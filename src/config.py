@@ -109,6 +109,7 @@ class LLMModelsConfig(BaseModel):
     writer: str = "gpt-4o"
     editor: str = "gpt-4o"
     discovery: str = "gpt-4o"
+    analyzer: str = "gpt-4o-mini"
 
 
 class LLMMaxTokensConfig(BaseModel):
@@ -117,6 +118,7 @@ class LLMMaxTokensConfig(BaseModel):
     writer: int = 100_000
     editor: int = 100_000
     discovery: int = 100_000
+    analyzer: int = 4000
 
 
 class LLMTemperatureConfig(BaseModel):
@@ -125,6 +127,7 @@ class LLMTemperatureConfig(BaseModel):
     writer: float = 0.4
     editor: float = 0.2
     discovery: float = 0.2
+    analyzer: float = 0.2
 
 
 class LLMConfig(BaseModel):
@@ -137,6 +140,10 @@ class SearchConfig(BaseModel):
     depth: str = "advanced"
     max_results: int = 8
     queries_per_task: int = 3
+    pre_plan_queries: int = 3
+    pre_plan_max_results: int = 8
+    gap_fill_queries: int = 2
+    gap_fill_max_results: int = 3
     include_domains: List[str] = Field(default_factory=list)
     exclude_domains: List[str] = Field(default_factory=lambda: ["pinterest.com", "quora.com"])
 
@@ -155,6 +162,10 @@ class DiscoveryConfig(BaseModel):
 
 class RewriteConfig(BaseModel):
     enabled: bool = True
+
+
+class RestructureConfig(BaseModel):
+    enabled: bool = False
 
 
 class ResearchConfig(BaseModel):
@@ -212,6 +223,7 @@ class Config(BaseModel):
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     rewrite: RewriteConfig = Field(default_factory=RewriteConfig)
+    restructure: RestructureConfig = Field(default_factory=RestructureConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     rate_limits: RateLimitsConfig = Field(default_factory=RateLimitsConfig)
@@ -255,6 +267,10 @@ class Settings(BaseSettings):
     discovery_model_name: Optional[str] = Field(default=None, alias="DISCOVERY_MODEL_NAME")
     discovery_model_input_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_INPUT_COST")
     discovery_model_output_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_OUTPUT_COST")
+
+    analyzer_model_name: Optional[str] = Field(default=None, alias="ANALYZER_MODEL_NAME")
+    analyzer_model_input_cost: Optional[float] = Field(default=None, alias="ANALYZER_MODEL_INPUT_COST")
+    analyzer_model_output_cost: Optional[float] = Field(default=None, alias="ANALYZER_MODEL_OUTPUT_COST")
 
     class Config:
         env_file = ".env"
@@ -323,6 +339,8 @@ def _apply_env_model_overrides(config: Config) -> None:
         config.llm.models.editor = settings.editor_model_name
     if settings.discovery_model_name:
         config.llm.models.discovery = settings.discovery_model_name
+    if settings.analyzer_model_name:
+        config.llm.models.analyzer = settings.analyzer_model_name
 
 
 def get_env_settings() -> Settings:
@@ -395,8 +413,13 @@ RESEARCH_PRESETS = {
             "research.max_concurrent_tasks": 1,
             "search.queries_per_task": 1,
             "search.max_results": 3,
+            "search.pre_plan_queries": 2,
+            "search.pre_plan_max_results": 5,
+            "search.gap_fill_queries": 0,
+            "search.gap_fill_max_results": 0,
             "discovery.enabled": False,
             "rewrite.enabled": False,
+            "restructure.enabled": False,
         },
     },
     "standard": {
@@ -415,10 +438,15 @@ RESEARCH_PRESETS = {
             "research.max_concurrent_tasks": 2,
             "search.queries_per_task": 2,
             "search.max_results": 5,
+            "search.pre_plan_queries": 3,
+            "search.pre_plan_max_results": 8,
+            "search.gap_fill_queries": 1,
+            "search.gap_fill_max_results": 3,
             "discovery.enabled": True,
             "discovery.frequency": 5,
             "discovery.max_suggestions_per_run": 2,
             "rewrite.enabled": True,
+            "restructure.enabled": False,
         },
     },
     "deep": {
@@ -437,10 +465,15 @@ RESEARCH_PRESETS = {
             "research.max_concurrent_tasks": 3,
             "search.queries_per_task": 3,
             "search.max_results": 8,
+            "search.pre_plan_queries": 4,
+            "search.pre_plan_max_results": 10,
+            "search.gap_fill_queries": 2,
+            "search.gap_fill_max_results": 5,
             "discovery.enabled": True,
             "discovery.frequency": 3,
             "discovery.max_suggestions_per_run": 3,
             "rewrite.enabled": True,
+            "restructure.enabled": True,
         },
     },
     "exhaustive": {
@@ -459,10 +492,15 @@ RESEARCH_PRESETS = {
             "research.max_concurrent_tasks": 4,
             "search.queries_per_task": 4,
             "search.max_results": 10,
+            "search.pre_plan_queries": 5,
+            "search.pre_plan_max_results": 10,
+            "search.gap_fill_queries": 3,
+            "search.gap_fill_max_results": 5,
             "discovery.enabled": True,
             "discovery.frequency": 2,
             "discovery.max_suggestions_per_run": 5,
             "rewrite.enabled": True,
+            "restructure.enabled": True,
         },
     },
 }

@@ -223,6 +223,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .toc a:hover {
             text-decoration: underline;
         }
+
+        .toc ul ul {
+            padding-left: 1.5rem;
+            margin-top: 0.2rem;
+        }
+
+        .toc ul ul li {
+            font-size: 0.9em;
+            border-bottom: none;
+        }
         
         .bibliography {
             background: var(--surface);
@@ -333,7 +343,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <h2>Table of Contents</h2>
         <ul>
         {% for item in toc %}
+            {% if item.children is defined and item.children %}
+            <li>
+                <a href="#{{ item.id }}">{{ item.title }}</a>
+                <ul>
+                {% for child in item.children %}
+                    <li><a href="#{{ child.id }}">{{ child.title }}</a></li>
+                {% endfor %}
+                </ul>
+            </li>
+            {% else %}
             <li><a href="#{{ item.id }}">{{ item.title }}</a></li>
+            {% endif %}
         {% endfor %}
         </ul>
     </nav>
@@ -534,10 +555,13 @@ class ReportCompiler:
 
             # Remap citations in content
             remapped_content = self._remap_citations(chapter["content"], local_to_global)
-            updated_chapters.append({
-                "task": task,
-                "content": remapped_content,
-            })
+            updated = {"task": task, "content": remapped_content}
+            # Preserve restructure metadata if present
+            if "topic_group" in chapter:
+                updated["topic_group"] = chapter["topic_group"]
+            if "subtopic_title" in chapter:
+                updated["subtopic_title"] = chapter["subtopic_title"]
+            updated_chapters.append(updated)
 
         return global_sources, updated_chapters
 
@@ -581,18 +605,35 @@ class ReportCompiler:
         lines.append("---")
         lines.append("")
         
+        # Detect hierarchical (restructured) mode
+        is_hierarchical = any(ch.get("topic_group") for ch in chapters)
+
         # Table of Contents
         if self.config.output.include_toc:
             lines.append("## Table of Contents")
             lines.append("")
-            for i, chapter in enumerate(chapters, 1):
-                title = chapter["task"].topic
-                anchor = self._slugify(title)
-                lines.append(f"{i}. [{title}](#{anchor})")
+            if is_hierarchical:
+                current_group = None
+                group_num = 0
+                for chapter in chapters:
+                    group = chapter.get("topic_group", "")
+                    subtopic = chapter.get("subtopic_title", chapter["task"].topic)
+                    if group != current_group:
+                        current_group = group
+                        group_num += 1
+                        anchor = self._slugify(group)
+                        lines.append(f"{group_num}. [{group}](#{anchor})")
+                    sub_anchor = self._slugify(subtopic)
+                    lines.append(f"   - [{subtopic}](#{sub_anchor})")
+            else:
+                for i, chapter in enumerate(chapters, 1):
+                    title = chapter["task"].topic
+                    anchor = self._slugify(title)
+                    lines.append(f"{i}. [{title}](#{anchor})")
             lines.append("")
             lines.append("---")
             lines.append("")
-        
+
         # Executive Summary
         if executive_summary and self.config.output.include_summary:
             lines.append("## Executive Summary")
@@ -601,19 +642,43 @@ class ReportCompiler:
             lines.append("")
             lines.append("---")
             lines.append("")
-        
+
         # Main Content
-        for chapter in chapters:
-            content = chapter["content"]
-            # Add section heading
-            lines.append(f"## {chapter['task'].topic}")
-            lines.append("")
-            # Ensure proper heading levels
-            content = self._normalize_headings(content)
-            lines.append(content)
-            lines.append("")
+        if is_hierarchical:
+            current_group = None
+            for chapter in chapters:
+                group = chapter.get("topic_group", "")
+                subtopic = chapter.get("subtopic_title", chapter["task"].topic)
+                content = chapter["content"]
+                # Insert group heading when group changes
+                if group != current_group:
+                    if current_group is not None:
+                        lines.append("---")
+                        lines.append("")
+                    current_group = group
+                    lines.append(f"## {group}")
+                    lines.append("")
+                # Subtopic heading
+                lines.append(f"### {subtopic}")
+                lines.append("")
+                content = self._normalize_headings(content)
+                content = self._demote_headings(content)
+                lines.append(content)
+                lines.append("")
             lines.append("---")
             lines.append("")
+        else:
+            for chapter in chapters:
+                content = chapter["content"]
+                # Add section heading
+                lines.append(f"## {chapter['task'].topic}")
+                lines.append("")
+                # Ensure proper heading levels
+                content = self._normalize_headings(content)
+                lines.append(content)
+                lines.append("")
+                lines.append("---")
+                lines.append("")
         
         # Conclusion
         if conclusion:
@@ -670,44 +735,115 @@ class ReportCompiler:
         # Keep slug generation deterministic for this output format
         self._used_slugs = set()
 
-        # Compute per-chapter anchors once and reuse them for TOC + headings.
-        chapter_anchors = [self._slugify(ch["task"].topic) for ch in chapters]
-        
+        # Detect hierarchical (restructured) mode
+        is_hierarchical = any(ch.get("topic_group") for ch in chapters)
+
         # Build TOC
         toc = []
         if self.config.output.include_toc:
-            for chapter, anchor in zip(chapters, chapter_anchors):
-                title = chapter["task"].topic
-                toc.append({
-                    "id": anchor,
-                    "title": title
-                })
-        
+            if is_hierarchical:
+                current_group = None
+                for chapter in chapters:
+                    group = chapter.get("topic_group", "")
+                    subtopic = chapter.get("subtopic_title", chapter["task"].topic)
+                    if group != current_group:
+                        current_group = group
+                        group_anchor = self._slugify(group)
+                        toc.append({
+                            "id": group_anchor,
+                            "title": group,
+                            "children": [],
+                        })
+                    sub_anchor = self._slugify(subtopic)
+                    toc[-1]["children"].append({
+                        "id": sub_anchor,
+                        "title": subtopic,
+                    })
+            else:
+                for chapter in chapters:
+                    title = chapter["task"].topic
+                    anchor = self._slugify(title)
+                    toc.append({
+                        "id": anchor,
+                        "title": title,
+                    })
+
         # Convert content to HTML
         content_parts = []
-        
+
         # Executive Summary
         if executive_summary and self.config.output.include_summary:
             content_parts.append(f'<h2 id="executive-summary">Executive Summary</h2>')
             content_parts.append(markdown.markdown(executive_summary))
-        
+
         # Main chapters
-        for chapter, anchor in zip(chapters, chapter_anchors):
-            task = chapter["task"]
-            md_content = chapter["content"]
+        if is_hierarchical:
+            # Re-derive anchors in same order as TOC to stay in sync
+            self._used_slugs_content = set()
+            current_group = None
+            for chapter in chapters:
+                group = chapter.get("topic_group", "")
+                subtopic = chapter.get("subtopic_title", chapter["task"].topic)
+                md_content = chapter["content"]
 
-            content_parts.append(f'<section>')
-            content_parts.append(f'<h2 id="{anchor}">{task.topic}</h2>')
+                if group != current_group:
+                    if current_group is not None:
+                        content_parts.append('</section>')
+                        content_parts.append('<hr>')
+                    current_group = group
+                    # Find the matching TOC anchor for this group
+                    group_anchor = ""
+                    for toc_item in toc:
+                        if toc_item["title"] == group:
+                            group_anchor = toc_item["id"]
+                            break
+                    content_parts.append(f'<section>')
+                    content_parts.append(f'<h2 id="{group_anchor}">{group}</h2>')
 
-            # Convert markdown to HTML
-            html_content = markdown.markdown(
-                md_content,
-                extensions=['tables', 'fenced_code', 'toc']
-            )
-            content_parts.append(html_content)
-            content_parts.append('</section>')
-            content_parts.append('<hr>')
-        
+                # Find the matching TOC anchor for this subtopic
+                sub_anchor = ""
+                for toc_item in toc:
+                    for child in toc_item.get("children", []):
+                        if child["title"] == subtopic:
+                            sub_anchor = child["id"]
+                            break
+                    if sub_anchor:
+                        break
+
+                content_parts.append(f'<h3 id="{sub_anchor}">{subtopic}</h3>')
+                demoted = self._demote_headings(md_content)
+                html_content = markdown.markdown(
+                    demoted,
+                    extensions=['tables', 'fenced_code', 'toc']
+                )
+                content_parts.append(html_content)
+
+            if current_group is not None:
+                content_parts.append('</section>')
+                content_parts.append('<hr>')
+        else:
+            for chapter in chapters:
+                task = chapter["task"]
+                md_content = chapter["content"]
+                # Find matching TOC anchor
+                anchor = ""
+                for toc_item in toc:
+                    if toc_item["title"] == task.topic:
+                        anchor = toc_item["id"]
+                        break
+                if not anchor:
+                    anchor = self._slugify(task.topic)
+
+                content_parts.append(f'<section>')
+                content_parts.append(f'<h2 id="{anchor}">{task.topic}</h2>')
+                html_content = markdown.markdown(
+                    md_content,
+                    extensions=['tables', 'fenced_code', 'toc']
+                )
+                content_parts.append(html_content)
+                content_parts.append('</section>')
+                content_parts.append('<hr>')
+
         # Conclusion
         if conclusion:
             content_parts.append('<h2 id="conclusion">Conclusion</h2>')
@@ -803,4 +939,18 @@ class ReportCompiler:
         """Ensure headings are properly formatted"""
         # Make sure # headings have space after #
         content = re.sub(r'^(#{1,6})([^\s#])', r'\1 \2', content, flags=re.MULTILINE)
+        return content
+
+    @staticmethod
+    def _demote_headings(content: str) -> str:
+        """Demote ### -> #### and #### -> ##### to avoid heading collisions.
+
+        Applied when section content (written with ### subheadings) is rendered
+        inside a ### subtopic heading in the restructured report.
+        Order matters: demote #### first, then ### to avoid double-demotion.
+        """
+        # Demote #### -> ##### (must come first)
+        content = re.sub(r'^####(?!#)', '#####', content, flags=re.MULTILINE)
+        # Demote ### -> ####
+        content = re.sub(r'^###(?!#)', '####', content, flags=re.MULTILINE)
         return content

@@ -8,7 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Tuple
 
-from .config import get_config, ResearchTask, TaskStatus
+from .config import get_config, ResearchTask, TaskStatus, Source
 from .llm_client import get_llm_client
 from .tools import (
     web_search, extract_source_info,
@@ -222,26 +222,135 @@ Your task:
 OUTPUT: The rewritten section content in Markdown format. Do NOT include the section title (## heading) — only the body content."""
 
 
+RESTRUCTURE_GROUPING_SYSTEM_PROMPT = """You are a Report Structure Architect. Your job is to organize a flat list of research sections into a hierarchical chapter structure with 2-7 primary topic groups.
+
+You will receive:
+- The original research query
+- A list of section topics with brief summaries
+
+Your task:
+1. Identify 2-7 primary topic groups (chapters) that naturally cluster the sections
+2. Assign every section to exactly one group
+3. Give each group a clear, descriptive title
+4. Give each section a concise subtopic title (may differ from the original topic to better fit the group context)
+
+Rules:
+- Every original section topic MUST appear exactly once in the output
+- Groups should be ordered for optimal reading flow (general/background first, specific/advanced later)
+- Subtopic titles should be concise (max 80 chars) and clearly distinguish sections within the same group
+- If sections don't cluster naturally, it's fine to have a group with only one section
+
+OUTPUT FORMAT:
+Output ONLY a valid JSON object:
+{{
+  "groups": [
+    {{
+      "title": "Primary Topic Title",
+      "sections": [
+        {{"original_topic": "exact original section topic", "subtopic_title": "new concise title"}}
+      ]
+    }}
+  ]
+}}"""
+
+
+RESTRUCTURE_REWRITE_SYSTEM_PROMPT = """You are a Report Editor performing a contextual rewrite of one section within a topic group. You are rewriting this section so it reads naturally as part of its group chapter.
+
+You will receive:
+- The original research query
+- The full hierarchical report structure (all groups and their subtopics, so you understand the big picture)
+- The group (chapter) title this section belongs to
+- The subtopic title assigned to this section
+- Summaries of the subtopics that PRECEDE this one in the group (so you can avoid repetition and build transitions)
+- The topics of subtopics that FOLLOW this one in the group (so you can add forward references)
+- A summary of all other groups in the report (for broader context)
+- The original content of this section
+
+Your task:
+1. Rewrite this section so it reads naturally within its group:
+   - Remove content that repeats what preceding subtopics already covered (reference them instead: "As discussed above in the subtopic on X...")
+   - Add brief forward references where helpful ("This will be explored further in the subtopic on Y")
+   - Avoid repeating information covered by siblings in the same group
+   - Ensure terminology is consistent with the group context
+   - Smooth the opening to transition naturally from the previous subtopic (or introduce the group theme if this is the first subtopic)
+2. Preserve ALL substantive content, facts, data, and citations — do not remove information, only restructure and rephrase
+3. Keep all [N] citation references exactly as they are — do not renumber or remove them
+4. Maintain markdown heading structure (### and ####)
+5. Keep approximately the same length — this is a contextual edit, not a summary
+
+OUTPUT: The rewritten section content in Markdown format. Do NOT include any heading — only the body content."""
+
+
+PRE_PLAN_ANALYSIS_SYSTEM_PROMPT = """You are a Research Analyst. Analyze the provided web page content and extract structured insights relevant to the research query.
+
+For the given page, extract:
+1. **Key Entities**: Specific names, products, organizations, frameworks, technologies, or people mentioned
+2. **Subtopics Covered**: Main themes and subtopics discussed on this page
+3. **Gaps/Missing Angles**: What important aspects of the research query does this page NOT address?
+4. **Notable Claims**: Specific data points, statistics, quotes, or assertions worth investigating further
+5. **Relevance Assessment**: How relevant is this page to the research query? (high/medium/low)
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON object:
+{{
+  "entities": ["entity1", "entity2"],
+  "subtopics": ["subtopic1", "subtopic2"],
+  "gaps": ["gap1", "gap2"],
+  "notable_claims": ["claim1", "claim2"],
+  "relevance": "high"
+}}"""
+
+
+GAP_ANALYSIS_SYSTEM_PROMPT = """You are a Research Gap Analyst. Review the gathered source material against the task requirements and identify what critical information is still missing.
+
+You will receive:
+- The task topic and description
+- The overall research query for context
+- Summaries of the source material already gathered
+
+Your job:
+1. Assess whether the gathered sources adequately cover the task requirements
+2. Identify specific gaps — missing perspectives, data, entities, or subtopics
+3. Generate targeted search queries to fill those gaps
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON object:
+{{
+  "has_gaps": true,
+  "gap_summary": "Brief description of what's missing",
+  "queries": ["targeted query 1", "targeted query 2"]
+}}
+
+If the gathered material is sufficient, return:
+{{
+  "has_gaps": false,
+  "gap_summary": "",
+  "queries": []
+}}"""
+
+
 QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Generate maximally diverse search queries — each must target a different angle or source type."""
 
 
 QUERY_GENERATOR_PROMPT = """Generate {num_queries} search queries for:
 
-Topic: {topic}
+Overall Research: {overall_query}
+Section Topic: {topic}
 Focus: {description}
 
-Each query MUST target a different angle (e.g., one broad overview, one specific/technical, one recent data or news). Vary terminology across queries. 3-8 words each.
+Each query MUST target a different angle (e.g., one broad overview, one specific/technical, one recent data or news). Vary terminology across queries. 3-8 words each. Queries should be relevant to both the section topic and the broader research context.
 
 Output ONLY the queries, one per line, no numbering or bullets."""
 
 
 QUERY_GENERATOR_JSON_PROMPT = """Generate {num_queries} search queries for:
 
-Topic: {topic}
+Overall Research: {overall_query}
+Section Topic: {topic}
 Focus: {description}
 
 Each query MUST target a different angle (e.g., broad overview, specific/technical angle, recent evidence/news angle).
-Use concise search phrasing and varied terminology.
+Use concise search phrasing and varied terminology. Queries should be relevant to both the section topic and the broader research context.
 
 Return ONLY a JSON object in this exact shape:
 {{"queries": ["query 1", "query 2"]}}
@@ -288,8 +397,8 @@ class PlannerAgent:
         if search_context:
             search_block = f"""
 
-## Preliminary Web Search Results
-The following search results were gathered to help you understand the current landscape of this topic. Use them to inform your plan.
+## Pre-Planning Research Analysis
+The following analysis was gathered from real web sources to help you understand the current landscape of this topic. Use the discovered entities, subtopics, and gaps to create highly specific, targeted research tasks.
 
 {search_context}
 
@@ -345,8 +454,10 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
             logger.error(f"Failed to create plan: {e}")
             raise
 
-    def _generate_planning_queries(self, query: str, num_queries: int = 2) -> List[str]:
+    def _generate_planning_queries(self, query: str, num_queries: int = None) -> List[str]:
         """Use the LLM to produce diverse, concise search queries for pre-planning."""
+        if num_queries is None:
+            num_queries = self.config.search.pre_plan_queries
         prompt = (
             f"Generate {num_queries} diverse web search queries to gather background "
             f"information for planning research on the following topic:\n\n"
@@ -400,7 +511,7 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
             session_id=session_id, task_id=None,
             event_type="query", query_group=qg, query_text=q,
         )
-        hits = web_search(q, max_results=5)
+        hits = web_search(q, max_results=self.config.search.pre_plan_max_results)
         for hit in hits:
             url = hit.get("url", "")
             if url:
@@ -413,17 +524,72 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
                 )
         return hits
 
+    def _scrape_pre_plan_result(self, result: dict, session_id: int = None) -> Source:
+        """Scrape a single search result and return a Source object. Thread-safe.
+
+        Returns None if scraping fails or quality is too low.
+        """
+        url = result.get("url", "")
+        if not url:
+            return None
+        try:
+            print_scrape(url)
+            source = extract_source_info(url, result)
+            if source.quality_score < self.config.quality.min_source_quality:
+                logger.info(f"[pre-plan] Skipping low-quality source: {url}")
+                return None
+            if not (source.full_content or source.snippet):
+                return None
+            return source
+        except Exception as e:
+            logger.warning(f"[pre-plan] Failed to scrape {url}: {e}")
+            return None
+
+    def _analyze_pre_plan_page(self, source: Source, query: str) -> dict:
+        """Run LLM analysis on a scraped page, returning analysis dict. Thread-safe.
+
+        Returns None if analysis fails.
+        """
+        content = source.full_content or source.snippet or ""
+        max_len = self.config.scraping.max_content_length
+        if len(content) > max_len:
+            content = content[:max_len] + "\n[... content truncated ...]"
+
+        prompt = (
+            f"Research Query: {query}\n\n"
+            f"Page Title: {source.title}\n"
+            f"URL: {source.url}\n\n"
+            f"Page Content:\n{content}"
+        )
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=PRE_PLAN_ANALYSIS_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.analyzer,
+                temperature=self.config.llm.temperature.analyzer,
+                json_mode=True,
+                model=self.config.llm.models.analyzer,
+            )
+            return json.loads(response)
+        except Exception as e:
+            logger.warning(f"[pre-plan] Analysis failed for {source.url}: {e}")
+            return None
+
     def _pre_search(self, query: str, session_id: int = None) -> str:
         """Run preliminary web searches to give the planner real-world context.
 
-        Uses the LLM to generate diverse search queries, then executes them
-        in parallel. Returns formatted context string with titles and snippets.
+        4-phase pipeline:
+        1. Search: Run diverse queries in parallel -> deduplicated results
+        2. Scrape: Scrape top results in parallel -> Source objects
+        3. Analyze: LLM analysis on each scraped page -> rich entity/subtopic data
+        4. Format: Build rich context string for the planner
+
+        Falls back to snippet-only context if scraping or analysis fails.
         """
         logger.info("Running pre-planning web searches...")
 
-        queries = self._generate_planning_queries(query, num_queries=2)
-
-        # Run all pre-planning searches in parallel
+        # Phase 1: Search
+        queries = self._generate_planning_queries(query)
         seen_urls = set()
         results = []
 
@@ -446,17 +612,130 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
             logger.warning("Pre-planning search returned no results")
             return ""
 
-        # Build compact context: title + snippet (no full content needed)
+        logger.info(f"Pre-planning search found {len(results)} unique results")
+
+        # Phase 2: Scrape top results in parallel (cap at 30)
+        scrape_targets = results[:30]
+        sources = []
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(self._scrape_pre_plan_result, r, session_id)
+                for r in scrape_targets
+            ]
+            for future in as_completed(futures):
+                try:
+                    source = future.result()
+                    if source is not None:
+                        sources.append(source)
+                except Exception as e:
+                    logger.warning(f"Pre-plan scrape error: {e}")
+
+        logger.info(f"Pre-planning scraped {len(sources)} pages successfully")
+
+        # Fallback to snippet-only if scraping produced nothing
+        if not sources:
+            logger.warning("Pre-planning scraping failed; falling back to snippets")
+            return self._format_snippet_context(results)
+
+        # Phase 3: Analyze each scraped page in parallel
+        analyses = []
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(self._analyze_pre_plan_page, src, query): src
+                for src in sources
+            }
+            for future in as_completed(futures):
+                src = futures[future]
+                try:
+                    analysis = future.result()
+                    if analysis is not None:
+                        analyses.append((src, analysis))
+                except Exception as e:
+                    logger.warning(f"Pre-plan analysis error: {e}")
+
+        logger.info(f"Pre-planning analyzed {len(analyses)} pages")
+
+        # Fallback to content previews if analysis failed
+        if not analyses:
+            logger.warning("Pre-planning analysis failed; falling back to content previews")
+            return self._format_content_preview_context(sources)
+
+        # Phase 4: Format rich context
+        return self._format_analysis_context(analyses)
+
+    def _format_snippet_context(self, results: list) -> str:
+        """Format search results as snippet-only context (fallback)."""
         parts = []
         for i, r in enumerate(results[:10], 1):
             title = r.get("title", "Untitled")
             snippet = r.get("snippet", "")
             url = r.get("url", "")
             parts.append(f"{i}. **{title}**\n   {snippet}\n   Source: {url}")
+        return "\n\n".join(parts)
 
-        context = "\n\n".join(parts)
-        logger.info(f"Pre-planning search found {len(results)} results")
-        return context
+    def _format_content_preview_context(self, sources: list) -> str:
+        """Format scraped sources as content previews (fallback)."""
+        parts = []
+        for i, src in enumerate(sources[:10], 1):
+            content = src.full_content or src.snippet or ""
+            preview = content[:1500]
+            if len(content) > 1500:
+                preview += "..."
+            parts.append(
+                f"{i}. **{src.title}**\n"
+                f"   URL: {src.url}\n"
+                f"   Content Preview: {preview}"
+            )
+        return "\n\n".join(parts)
+
+    def _format_analysis_context(self, analyses: list) -> str:
+        """Format LLM analyses into rich context for the planner."""
+        # Collect all entities and subtopics across pages for a summary
+        all_entities = set()
+        all_subtopics = set()
+        all_gaps = set()
+
+        parts = []
+        for i, (src, analysis) in enumerate(analyses[:15], 1):
+            entities = analysis.get("entities", [])
+            subtopics = analysis.get("subtopics", [])
+            gaps = analysis.get("gaps", [])
+            claims = analysis.get("notable_claims", [])
+            relevance = analysis.get("relevance", "medium")
+
+            all_entities.update(entities)
+            all_subtopics.update(subtopics)
+            all_gaps.update(gaps)
+
+            part = f"### Source {i}: {src.title}\n"
+            part += f"URL: {src.url}\n"
+            part += f"Relevance: {relevance}\n"
+            if entities:
+                part += f"Key Entities: {', '.join(entities[:10])}\n"
+            if subtopics:
+                part += f"Subtopics: {', '.join(subtopics[:8])}\n"
+            if claims:
+                part += f"Notable Claims:\n"
+                for claim in claims[:5]:
+                    part += f"  - {claim}\n"
+            if gaps:
+                part += f"Gaps: {', '.join(gaps[:5])}\n"
+
+            parts.append(part)
+
+        # Add a summary section at the top
+        summary = "### Cross-Source Summary\n"
+        if all_entities:
+            summary += f"**All Entities Discovered**: {', '.join(sorted(all_entities)[:30])}\n"
+        if all_subtopics:
+            summary += f"**All Subtopics Found**: {', '.join(sorted(all_subtopics)[:20])}\n"
+        if all_gaps:
+            summary += f"**Identified Gaps**: {', '.join(sorted(all_gaps)[:15])}\n"
+        summary += "\n---\n"
+
+        return summary + "\n\n".join(parts)
     
     def _parse_plan_json(self, response: str) -> List[dict]:
         """Parse the planner's JSON response into a list of task dicts (no DB writes)."""
@@ -558,10 +837,10 @@ class ResearcherAgent:
 
         try:
             # Step 1: Generate search queries
-            queries = self._generate_queries(task)
+            queries = self._generate_queries(task, overall_query=overall_query)
 
             # Step 2: Execute searches and gather content
-            search_context = self._execute_searches(queries, task.id, session_id=session_id)
+            search_context, initial_source_count = self._execute_searches(queries, task.id, session_id=session_id)
 
             # Handle empty search results
             has_sources = bool(search_context and search_context.strip())
@@ -573,7 +852,29 @@ class ResearcherAgent:
                     "Do NOT include any [N] citation markers."
                 )
 
-            # Step 3: Synthesize and write
+            # Step 3 (gap-fill): If we have sources and gap-fill is enabled,
+            # check for missing information and run targeted follow-up searches
+            gap_fill_queries_count = self.config.search.gap_fill_queries
+            if has_sources and gap_fill_queries_count > 0:
+                try:
+                    gap_queries = self._identify_gaps(task, search_context, overall_query)
+                    if gap_queries:
+                        # Collect URLs already seen so gap-fill doesn't re-scrape them
+                        existing_sources = self.db.get_sources_for_task(task.id)
+                        existing_urls = {s.url for s in existing_sources}
+                        gap_context = self._execute_gap_fill_searches(
+                            gap_queries, task.id, existing_urls, session_id,
+                            source_number_offset=initial_source_count
+                        )
+                        if gap_context:
+                            search_context += (
+                                "\n\n---\n\n## Additional Sources (Gap-Fill)\n\n"
+                                + gap_context
+                            )
+                except Exception as e:
+                    logger.warning(f"Gap-fill failed for task {task.id}: {e}")
+
+            # Step 4: Synthesize and write
             content, new_tasks, glossary_terms = self._synthesize(
                 task, search_context, overall_query, other_sections, session_id=session_id
             )
@@ -591,7 +892,7 @@ class ResearcherAgent:
             logger.error(f"Research failed for task {task.id}: {e}")
             raise
     
-    def _generate_queries(self, task: ResearchTask) -> List[str]:
+    def _generate_queries(self, task: ResearchTask, overall_query: str = "") -> List[str]:
         """Generate search queries for the task.
 
         Retries once on empty LLM response, then falls back to a
@@ -619,6 +920,7 @@ class ResearcherAgent:
             tool_payload = self.client.complete_with_function(
                 prompt=QUERY_GENERATOR_JSON_PROMPT.format(
                     num_queries=num_queries,
+                    overall_query=overall_query or task.topic,
                     topic=task.topic,
                     description=task.description
                 ),
@@ -648,12 +950,14 @@ class ResearcherAgent:
 
         json_prompt = QUERY_GENERATOR_JSON_PROMPT.format(
             num_queries=num_queries,
+            overall_query=overall_query or task.topic,
             topic=task.topic,
             description=task.description
         )
 
         base_prompt = QUERY_GENERATOR_PROMPT.format(
             num_queries=num_queries,
+            overall_query=overall_query or task.topic,
             topic=task.topic,
             description=task.description
         )
@@ -831,8 +1135,11 @@ class ResearcherAgent:
                 )
         return results
 
-    def _execute_searches(self, queries: List[str], task_id: int, session_id: int = None) -> str:
-        """Execute searches in parallel and aggregate results"""
+    def _execute_searches(self, queries: List[str], task_id: int, session_id: int = None) -> Tuple[str, int]:
+        """Execute searches in parallel and aggregate results.
+
+        Returns (context_string, source_count).
+        """
         logger.info(f"Executing searches with {len(queries)} queries")
 
         # Phase 1: Run all search queries in parallel
@@ -876,25 +1183,25 @@ class ResearcherAgent:
                     logger.info(f"Skipping low-quality source: {url}")
                     continue
 
-                # Save source to database (position preserves citation order)
-                self.db.add_source(source, task_id, position=sources_added)
-
                 # Build context — use configured max_content_length
                 content = source.full_content or source.snippet or ""
                 max_len = self.config.scraping.max_content_length
                 if content:
+                    # Save source to database only when it will appear in the prompt
+                    # (position must match prompt order for citation correctness)
+                    self.db.add_source(source, task_id, position=sources_added)
+
+                    sources_added += 1
                     content_str = content[:max_len]
                     if len(content) > max_len:
                         content_str += "\n[... content truncated ...]"
-                    context_parts.append(f"""
-### Source: {source.title}
-URL: {source.url}
-Domain: {source.domain}
-{'[Academic Source]' if source.is_academic else ''}
-
-{content_str}
-""")
-                    sources_added += 1
+                    context_parts.append(
+                        f"\n### Source {sources_added}: {source.title}\n"
+                        f"URL: {source.url}\n"
+                        f"Domain: {source.domain}\n"
+                        f"{'[Academic Source]' if source.is_academic else ''}\n\n"
+                        f"{content_str}\n"
+                    )
 
                     if sources_added >= max_sources:
                         break
@@ -903,8 +1210,141 @@ Domain: {source.domain}
                 logger.warning(f"Failed to extract from {url}: {e}")
                 continue
 
+        return "\n\n---\n\n".join(context_parts), sources_added
+
+    def _identify_gaps(
+        self, task: ResearchTask, search_context: str, overall_query: str
+    ) -> List[str]:
+        """Analyze gathered sources vs task requirements and return gap-fill queries.
+
+        Returns a list of targeted search queries (possibly empty) to fill gaps.
+        """
+        max_gap_queries = self.config.search.gap_fill_queries
+        if max_gap_queries <= 0:
+            return []
+
+        # Build a condensed summary of what we have (truncate to keep prompt small)
+        context_preview = search_context[:8000]
+        if len(search_context) > 8000:
+            context_preview += "\n[... additional sources omitted for brevity ...]"
+
+        prompt = (
+            f"Overall Research Query: {overall_query}\n\n"
+            f"Task Topic: {task.topic}\n"
+            f"Task Description: {task.description}\n\n"
+            f"Gathered Source Material (summary):\n{context_preview}\n\n"
+            f"Maximum gap-fill queries to suggest: {max_gap_queries}"
+        )
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=GAP_ANALYSIS_SYSTEM_PROMPT,
+                max_tokens=2000,
+                temperature=0.2,
+                json_mode=True,
+                model=self.config.llm.models.researcher,
+            )
+            data = json.loads(response)
+            if not data.get("has_gaps", False):
+                logger.info(f"Gap analysis: no gaps found for task {task.id}")
+                return []
+
+            queries = [q.strip() for q in data.get("queries", []) if q.strip()]
+            queries = queries[:max_gap_queries]
+            if queries:
+                logger.info(
+                    f"Gap analysis found {len(queries)} gap-fill queries for task {task.id}: {queries}"
+                )
+            return queries
+        except Exception as e:
+            logger.warning(f"Gap analysis LLM call failed for task {task.id}: {e}")
+            return []
+
+    def _execute_gap_fill_searches(
+        self,
+        queries: List[str],
+        task_id: int,
+        existing_urls: set,
+        session_id: int = None,
+        source_number_offset: int = 0,
+    ) -> str:
+        """Execute gap-fill search queries, scrape new results, and return context.
+
+        Skips URLs already seen in the initial search. Saves sources with position
+        offset of 100 to keep gap-fill citations after initial sources.
+        """
+        max_results = self.config.search.gap_fill_max_results
+        if max_results <= 0:
+            return ""
+
+        # Run all gap-fill searches in parallel
+        all_results = []
+        seen_urls = set(existing_urls)
+
+        with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+            futures = [
+                executor.submit(self._search_single_query, q, task_id, session_id)
+                for q in queries
+            ]
+            for future in as_completed(futures):
+                try:
+                    for r in future.result():
+                        url = r.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(r)
+                except Exception as e:
+                    logger.warning(f"Gap-fill search failed: {e}")
+
+        if not all_results:
+            logger.info(f"Gap-fill searches returned no new results for task {task_id}")
+            return ""
+
+        logger.info(f"Gap-fill found {len(all_results)} new results for task {task_id}")
+
+        # Scrape and build context
+        context_parts = []
+        sources_added = 0
+
+        for result in all_results[: max_results * 2]:
+            url = result.get("url", "")
+            if not url:
+                continue
+            try:
+                print_scrape(url)
+                source = extract_source_info(url, result)
+                if source.quality_score < self.config.quality.min_source_quality:
+                    continue
+
+                content = source.full_content or source.snippet or ""
+                max_len = self.config.scraping.max_content_length
+                if content:
+                    # Save source only when it will appear in the prompt
+                    # Position offset 100+ so gap-fill citations sort after initial sources
+                    self.db.add_source(source, task_id, position=100 + sources_added)
+
+                    sources_added += 1
+                    source_num = source_number_offset + sources_added
+                    content_str = content[:max_len]
+                    if len(content) > max_len:
+                        content_str += "\n[... content truncated ...]"
+                    context_parts.append(
+                        f"### Source {source_num}: {source.title}\n"
+                        f"URL: {source.url}\n"
+                        f"Domain: {source.domain}\n"
+                        f"{'[Academic Source]' if source.is_academic else ''}\n\n"
+                        f"{content_str}"
+                    )
+                    if sources_added >= max_results:
+                        break
+            except Exception as e:
+                logger.warning(f"Gap-fill scrape failed for {url}: {e}")
+                continue
+
+        logger.info(f"Gap-fill added {sources_added} new sources for task {task_id}")
         return "\n\n---\n\n".join(context_parts)
-    
+
     def _synthesize(
         self,
         task: ResearchTask,
@@ -1170,9 +1610,9 @@ class DiscoveryAgent:
         """
         logger.info("Running discovery agent for gap analysis...")
 
-        # Build task list context
+        # Build task list context (include descriptions for overlap detection)
         tasks_text = "\n".join(
-            f"- [{t['status']}] {t['topic']}" for t in all_tasks
+            f"- [{t['status']}] {t['topic']}: {t.get('description', '')}" for t in all_tasks
         )
 
         # Build section summaries context
@@ -1275,12 +1715,18 @@ class EditorAgent:
     def config(self):
         return get_config()
     
-    def generate_executive_summary(self, query: str, section_summaries: List[Dict[str, str]]) -> str:
+    def generate_executive_summary(
+        self,
+        query: str,
+        section_summaries: List[Dict[str, str]],
+        report_structure: str = ""
+    ) -> str:
         """Generate an executive summary for the report.
 
         Args:
             query: The original research query
             section_summaries: List of dicts with 'topic' and 'summary' keys
+            report_structure: Optional hierarchical structure description (groups/chapters)
         """
         logger.info("Generating executive summary...")
 
@@ -1288,10 +1734,14 @@ class EditorAgent:
             f"### {s['topic']}\n{s['summary']}" for s in section_summaries
         )
 
+        structure_block = ""
+        if report_structure:
+            structure_block = f"\n\nReport Structure:\n{report_structure}\n"
+
         prompt = f"""Write an executive summary for this research report.
 
 Research Query: {query}
-
+{structure_block}
 Section Findings:
 {sections_text}
 
@@ -1307,13 +1757,20 @@ Synthesize the actual findings above into a 300-500 word executive summary."""
 
         return response
     
-    def generate_conclusion(self, query: str, section_summaries: List[Dict[str, str]], word_count: int) -> str:
+    def generate_conclusion(
+        self,
+        query: str,
+        section_summaries: List[Dict[str, str]],
+        word_count: int,
+        report_structure: str = ""
+    ) -> str:
         """Generate a conclusion for the report.
 
         Args:
             query: The original research query
             section_summaries: List of dicts with 'topic' and 'summary' keys
             word_count: Total words in the report body
+            report_structure: Optional hierarchical structure description (groups/chapters)
         """
         logger.info("Generating conclusion...")
 
@@ -1321,10 +1778,14 @@ Synthesize the actual findings above into a 300-500 word executive summary."""
             f"### {s['topic']}\n{s['summary']}" for s in section_summaries
         )
 
+        structure_block = ""
+        if report_structure:
+            structure_block = f"\n\nReport Structure:\n{report_structure}\n"
+
         prompt = f"""Write a conclusion for this research report ({word_count:,} words across {len(section_summaries)} sections).
 
 Research Query: {query}
-
+{structure_block}
 Section Findings:
 {sections_text}
 
@@ -1340,19 +1801,30 @@ Write a 400-600 word conclusion that synthesizes findings across sections, ident
 
         return response
 
-    def determine_section_order(self, query: str, section_topics: List[str]) -> List[str]:
+    def determine_section_order(
+        self,
+        query: str,
+        section_topics: List[str],
+        section_summaries: List[Dict[str, str]] = None
+    ) -> List[str]:
         """Determine the optimal reading order for report sections.
 
         Args:
             query: The original research query
             section_topics: List of section topic strings
+            section_summaries: Optional list of dicts with 'topic' and 'summary' keys
 
         Returns:
             Ordered list of section topics
         """
         logger.info("Determining optimal section order...")
 
-        topics_text = "\n".join(f"- {t}" for t in section_topics)
+        if section_summaries:
+            topics_text = "\n".join(
+                f"- **{s['topic']}**: {s['summary'][:200]}" for s in section_summaries
+            )
+        else:
+            topics_text = "\n".join(f"- {t}" for t in section_topics)
 
         prompt = f"""Determine the optimal reading order for these sections of a research report.
 
@@ -1464,4 +1936,163 @@ Rewrite the above section content. Preserve all facts, data, and citations. Impr
             return response
         except Exception as e:
             logger.warning(f"Rewrite failed for '{section_topic}': {e}; keeping original")
+            return section_content
+
+    def group_sections_into_topics(
+        self,
+        query: str,
+        section_summaries: List[Dict[str, str]]
+    ) -> List[Dict]:
+        """Group sections into primary topic clusters.
+
+        Args:
+            query: Original research query
+            section_summaries: List of dicts with 'topic' and 'summary' keys
+
+        Returns:
+            List of group dicts: [{"title": str, "sections": [{"original_topic": str, "subtopic_title": str}]}]
+        """
+        logger.info("Grouping sections into topic clusters...")
+
+        sections_text = "\n".join(
+            f"- **{s['topic']}**: {s['summary']}" for s in section_summaries
+        )
+
+        prompt = f"""Organize the following research sections into 2-7 primary topic groups.
+
+## Research Query
+{query}
+
+## Sections
+{sections_text}
+
+Group these sections into logical chapters and assign subtopic titles."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=RESTRUCTURE_GROUPING_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.editor,
+                temperature=0.1,
+                json_mode=True,
+                model=self.config.llm.models.editor
+            )
+
+            data = json.loads(response)
+            groups = data.get("groups", [])
+
+            if not groups:
+                raise ValueError("Empty groups returned")
+
+            # Validate all original topics are present
+            assigned_topics = set()
+            for group in groups:
+                for section in group.get("sections", []):
+                    assigned_topics.add(section.get("original_topic", ""))
+
+            original_topics = {s["topic"] for s in section_summaries}
+            missing = original_topics - assigned_topics
+
+            if missing:
+                logger.warning(f"Grouping missed {len(missing)} sections; appending to last group")
+                last_group = groups[-1]
+                for topic in missing:
+                    last_group["sections"].append({
+                        "original_topic": topic,
+                        "subtopic_title": topic,
+                    })
+
+            return groups
+
+        except Exception as e:
+            logger.warning(f"Section grouping failed: {e}; using flat fallback")
+            # Fallback: one group per section
+            return [
+                {
+                    "title": s["topic"],
+                    "sections": [{"original_topic": s["topic"], "subtopic_title": s["topic"]}],
+                }
+                for s in section_summaries
+            ]
+
+    def rewrite_section_in_group(
+        self,
+        query: str,
+        group_title: str,
+        subtopic_title: str,
+        section_content: str,
+        full_toc: str,
+        preceding_siblings: List[Dict[str, str]],
+        following_sibling_titles: List[str],
+        other_groups_summary: str
+    ) -> str:
+        """Rewrite a section within its topic-group context.
+
+        Args:
+            query: Original research query
+            group_title: The primary topic (chapter) this section belongs to
+            subtopic_title: The assigned subtopic title
+            section_content: Original markdown content
+            full_toc: Full hierarchical TOC string (all groups + subtopics)
+            preceding_siblings: List of {"subtopic_title": str, "content_or_summary": str}
+                for subtopics before this one in the group
+            following_sibling_titles: List of subtopic title strings after this one
+            other_groups_summary: Text listing all other groups and subtopics
+
+        Returns:
+            Rewritten section content (markdown, no heading)
+        """
+        logger.info(f"Rewriting section in group context: {subtopic_title}")
+
+        preceding_text = ""
+        if preceding_siblings:
+            parts = []
+            for sib in preceding_siblings:
+                parts.append(f"### {sib['subtopic_title']}\n{sib['content_or_summary']}")
+            preceding_text = "\n\n".join(parts)
+
+        following_text = ""
+        if following_sibling_titles:
+            following_text = "\n".join(f"- {t}" for t in following_sibling_titles)
+
+        prompt = f"""Rewrite this section within its topic-group context.
+
+## Research Query
+{query}
+
+## Full Report Structure
+{full_toc}
+
+## Current Group (Chapter): {group_title}
+
+## This Section: {subtopic_title}
+
+## Preceding Subtopics in This Group
+{preceding_text if preceding_text else "(This is the first subtopic in the group)"}
+
+## Following Subtopics in This Group
+{following_text if following_text else "(This is the last subtopic in the group)"}
+
+## Other Groups in the Report
+{other_groups_summary if other_groups_summary else "(No other groups)"}
+
+## Section Content to Rewrite
+
+{section_content}
+
+---
+
+Rewrite the above section content. Preserve all facts, data, and citations. Improve coherence within the group context."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=RESTRUCTURE_REWRITE_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.editor,
+                temperature=self.config.llm.temperature.editor,
+                model=self.config.llm.models.editor
+            )
+            return response
+        except Exception as e:
+            logger.warning(f"Restructure rewrite failed for '{subtopic_title}': {e}; keeping original")
             return section_content

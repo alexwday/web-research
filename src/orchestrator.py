@@ -362,9 +362,10 @@ class ResearchOrchestrator:
         if not completed_tasks:
             return
 
-        # Build task list for discovery agent
+        # Build task list for discovery agent (include descriptions so
+        # the LLM can avoid suggesting overlapping topics)
         task_list = [
-            {"topic": t.topic, "status": t.status}
+            {"topic": t.topic, "status": t.status, "description": t.description}
             for t in all_tasks
         ]
 
@@ -431,8 +432,16 @@ class ResearchOrchestrator:
             query_text="Determining optimal section order",
         )
         topics = [ch["task"].topic for ch in chapters]
+        # Build summaries so the ordering LLM can see content, not just names
+        ordering_summaries = []
+        for ch in chapters:
+            words = ch["content"].split()
+            summary = " ".join(words[:200])
+            if len(words) > 200:
+                summary += " ..."
+            ordering_summaries.append({"topic": ch["task"].topic, "summary": summary})
         ordered_topics = self.editor.determine_section_order(
-            self.query or "", topics
+            self.query or "", topics, section_summaries=ordering_summaries
         )
 
         # Reorder chapters to match
@@ -503,7 +512,7 @@ class ResearchOrchestrator:
 
         print_info("Editor rewrite pass complete")
 
-        # Rebuild section_summaries from rewritten content
+        # Rebuild section_summaries from rewritten content (used by _rewrite_sections)
         section_summaries = []
         for ch in rewritten_chapters:
             words = ch["content"].split()
@@ -517,6 +526,147 @@ class ResearchOrchestrator:
 
         return rewritten_chapters, section_summaries
 
+    def _restructure_sections(self, chapters: list, section_summaries: list) -> tuple:
+        """Group sections into topics and rewrite each within its group context.
+
+        Returns (restructured_chapters, new_section_summaries).
+        """
+        print_info("Running restructure pass (grouping + contextual rewrite)...")
+
+        # Phase 1: Grouping
+        self.db.add_search_event(
+            session_id=self.session_id, task_id=None,
+            event_type="agent_action", query_group="restructure_group",
+            query_text="Grouping sections into topic clusters",
+        )
+        groups = self.editor.group_sections_into_topics(
+            self.query or "", section_summaries
+        )
+        print_info(f"Grouped sections into {len(groups)} primary topics")
+
+        # Build lookup maps
+        topic_to_chapter = {ch["task"].topic: ch for ch in chapters}
+        topic_to_summary = {s["topic"]: s["summary"] for s in section_summaries}
+
+        # Build all-groups overview text for rewrite context
+        all_groups_text = ""
+        for g in groups:
+            subtopics = ", ".join(s["subtopic_title"] for s in g.get("sections", []))
+            all_groups_text += f"- **{g['title']}**: {subtopics}\n"
+
+        # Phase 2: Rewriting
+        restructured_chapters = []
+        file_index = 0
+
+        for group in groups:
+            group_title = group["title"]
+            group_sections = group.get("sections", [])
+
+            for sec_idx, section in enumerate(group_sections):
+                original_topic = section.get("original_topic", "")
+                subtopic_title = section.get("subtopic_title", original_topic)
+
+                chapter = topic_to_chapter.get(original_topic)
+                if not chapter:
+                    logger.warning(f"Restructure: no chapter found for topic '{original_topic}'; skipping")
+                    continue
+
+                file_index += 1
+
+                # Build preceding sibling context (sections before this one in group)
+                preceding_siblings = []
+                for sib in group_sections[:sec_idx]:
+                    sib_topic = sib.get("original_topic", "")
+                    sib_chapter = topic_to_chapter.get(sib_topic)
+                    if sib_chapter:
+                        sib_content = sib_chapter["content"]
+                        sib_words = sib_content.split()
+                        if len(sib_words) <= 600:
+                            context_text = sib_content
+                        else:
+                            context_text = " ".join(sib_words[:500]) + " ..."
+                    else:
+                        context_text = topic_to_summary.get(sib_topic, "")
+                    preceding_siblings.append({
+                        "subtopic_title": sib.get("subtopic_title", sib_topic),
+                        "content_or_summary": context_text,
+                    })
+
+                # Build following sibling titles (sections after this one in group)
+                following_sibling_titles = [
+                    sib.get("subtopic_title", sib.get("original_topic", ""))
+                    for sib in group_sections[sec_idx + 1:]
+                ]
+
+                # Build other-groups summary (all groups except current)
+                other_groups_lines = []
+                for g in groups:
+                    if g["title"] == group_title:
+                        continue
+                    subtopics = ", ".join(s["subtopic_title"] for s in g.get("sections", []))
+                    other_groups_lines.append(f"- **{g['title']}**: {subtopics}")
+                other_groups_summary = "\n".join(other_groups_lines)
+
+                # Rewrite
+                self.db.add_search_event(
+                    session_id=self.session_id, task_id=chapter["task"].id,
+                    event_type="agent_action", query_group="restructure_rewrite",
+                    query_text=f"Rewriting section in group '{group_title}': {subtopic_title}",
+                )
+                rewritten_content = self.editor.rewrite_section_in_group(
+                    query=self.query or "",
+                    group_title=group_title,
+                    subtopic_title=subtopic_title,
+                    section_content=chapter["content"],
+                    full_toc=all_groups_text,
+                    preceding_siblings=preceding_siblings,
+                    following_sibling_titles=following_sibling_titles,
+                    other_groups_summary=other_groups_summary,
+                )
+
+                # Save to numbered file and update task
+                task_obj = chapter["task"]
+                target_file = generate_file_path(
+                    task_obj.topic,
+                    self.config.output.directory,
+                    file_index,
+                )
+                save_markdown(target_file, rewritten_content, append=False)
+                if task_obj.file_path != target_file:
+                    self.db.update_task(task_obj.id, file_path=target_file)
+                    task_obj.file_path = target_file
+
+                restructured_chapters.append({
+                    "task": task_obj,
+                    "content": rewritten_content,
+                    "topic_group": group_title,
+                    "subtopic_title": subtopic_title,
+                })
+
+                # Update lookup so subsequent siblings see rewritten content
+                topic_to_chapter[original_topic] = {
+                    "task": task_obj,
+                    "content": rewritten_content,
+                }
+
+                print_write(target_file, count_words(rewritten_content))
+
+        print_info("Restructure pass complete")
+
+        # Rebuild section summaries using subtopic titles (matching report headings)
+        new_summaries = []
+        for ch in restructured_chapters:
+            words = ch["content"].split()
+            summary = " ".join(words[:500])
+            if len(words) > 500:
+                summary += " ..."
+            new_summaries.append({
+                "topic": ch.get("subtopic_title", ch["task"].topic),
+                "summary": summary,
+            })
+
+        return restructured_chapters, new_summaries
+
     def _compile_final_report(self) -> dict:
         """Compile the final report"""
         print_info("Compiling final report...")
@@ -525,8 +675,12 @@ class ResearchOrchestrator:
         tasks = self.db.get_all_tasks(TaskStatus.COMPLETED, session_id=self.session_id)
         section_summaries, pre_read_chapters = self._build_section_summaries(tasks)
 
-        # Editor rewrite pass: reorder and rewrite sections for cohesion
-        if self.config.rewrite.enabled and len(pre_read_chapters) > 1:
+        # Restructure takes precedence over rewrite (subsumes it)
+        if self.config.restructure.enabled and len(pre_read_chapters) > 1:
+            pre_read_chapters, section_summaries = self._restructure_sections(
+                pre_read_chapters, section_summaries
+            )
+        elif self.config.rewrite.enabled and len(pre_read_chapters) > 1:
             pre_read_chapters, section_summaries = self._rewrite_sections(
                 pre_read_chapters
             )
@@ -534,7 +688,23 @@ class ResearchOrchestrator:
         # Generate executive summary and conclusion in parallel
         executive_summary = None
         conclusion = None
-        total_words = self.db.get_total_word_count(session_id=self.session_id)
+        # Calculate word count from actual (possibly rewritten) content, not stale DB values
+        total_words = sum(count_words(ch["content"]) for ch in pre_read_chapters)
+
+        # Build report structure description for exec summary / conclusion
+        # when restructured, convey the group hierarchy
+        report_structure = ""
+        if any(ch.get("topic_group") for ch in pre_read_chapters):
+            current_group = None
+            structure_lines = []
+            for ch in pre_read_chapters:
+                group = ch.get("topic_group", "")
+                subtopic = ch.get("subtopic_title", ch["task"].topic)
+                if group != current_group:
+                    current_group = group
+                    structure_lines.append(f"- **{group}**")
+                structure_lines.append(f"  - {subtopic}")
+            report_structure = "\n".join(structure_lines)
 
         with ThreadPoolExecutor(max_workers=2) as comp_executor:
             futures = {}
@@ -547,7 +717,7 @@ class ResearchOrchestrator:
                 )
                 futures[comp_executor.submit(
                     self.editor.generate_executive_summary,
-                    self.query, section_summaries
+                    self.query, section_summaries, report_structure
                 )] = 'summary'
 
             self.db.add_search_event(
@@ -557,7 +727,7 @@ class ResearchOrchestrator:
             )
             futures[comp_executor.submit(
                 self.editor.generate_conclusion,
-                self.query, section_summaries, total_words
+                self.query, section_summaries, total_words, report_structure
             )] = 'conclusion'
 
             for future in as_completed(futures):
