@@ -344,22 +344,62 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
             logger.error(f"Failed to create plan: {e}")
             raise
 
+    def _generate_planning_queries(self, query: str, num_queries: int = 2) -> List[str]:
+        """Use the LLM to produce diverse, concise search queries for pre-planning."""
+        prompt = (
+            f"Generate {num_queries} diverse web search queries to gather background "
+            f"information for planning research on the following topic:\n\n"
+            f"{query}\n\n"
+            f"Each query should be 3-8 words, target a different angle "
+            f"(e.g. broad overview, key debates, recent developments), "
+            f"and use concise search-engine phrasing.\n\n"
+            f'Return ONLY a JSON object: {{"queries": ["query1", "query2"]}}'
+        )
+        try:
+            tool_schema = {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": num_queries + 2,
+                    }
+                },
+                "required": ["queries"],
+                "additionalProperties": False,
+            }
+            result = self.client.complete_with_function(
+                prompt=prompt,
+                system=QUERY_GENERATOR_SYSTEM,
+                function_name=QUERY_GENERATOR_TOOL_NAME,
+                function_description=QUERY_GENERATOR_TOOL_DESC,
+                function_parameters=tool_schema,
+                max_tokens=self.config.llm.max_tokens.researcher,
+                temperature=0.3,
+                model=self.config.llm.models.researcher,
+                require_tool_call=True,
+            )
+            if result and "queries" in result:
+                queries = [q.strip() for q in result["queries"] if q.strip()][:num_queries]
+                if queries:
+                    logger.info(f"LLM generated {len(queries)} planning queries: {queries}")
+                    return queries
+        except Exception as e:
+            logger.warning(f"LLM planning query generation failed, using fallback: {e}")
+
+        # Fallback: use the raw query
+        return [query]
+
     def _pre_search(self, query: str, session_id: int = None) -> str:
         """Run preliminary web searches to give the planner real-world context.
 
-        Executes 2 searches: one broad overview query and one more specific
-        angle. Returns formatted context string with titles and snippets.
+        Uses the LLM to generate diverse search queries, then executes them.
+        Returns formatted context string with titles and snippets.
         """
         logger.info("Running pre-planning web searches...")
 
-        # Build a short variant for the second query so the two searches
-        # are visibly different in the activity log (long queries get
-        # CSS-truncated and can look identical).
-        short_query = query[:80].rstrip() if len(query) > 80 else query
-        queries = [
-            query,
-            f"{short_query} key topics overview",
-        ]
+        queries = self._generate_planning_queries(query, num_queries=2)
 
         seen_urls = set()
         results = []
