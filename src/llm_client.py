@@ -2,10 +2,11 @@
 LLM Client Module for Deep Research Agent
 Uses OpenAI API with support for direct API key or OAuth2 token auth.
 """
+import json
 import os
 import threading
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -180,6 +181,34 @@ class OpenAIClient:
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
 
+    @staticmethod
+    def _extract_content_text(response: Any) -> str:
+        """Extract text content from a chat-completions response choice."""
+        try:
+            message = response.choices[0].message
+        except Exception:
+            return ""
+
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ""
+
+        # Defensive parsing for SDK variants that may return structured parts.
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                else:
+                    text = getattr(part, "text", None)
+                if text:
+                    parts.append(str(text))
+            return "\n".join(parts).strip()
+
+        return str(content)
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def complete(
         self,
@@ -208,8 +237,9 @@ class OpenAIClient:
             "messages": messages,
         }
 
-        # Models that only accept default temperature (reasoning & gpt-5-mini/nano)
-        _no_temp = ("o1", "o3", "o4", "gpt-5-mini", "gpt-5-nano")
+        # Reasoning and GPT-5 family models should use default temperature handling.
+        # GPT-5 parameter compatibility differs by variant/reasoning mode.
+        _no_temp = ("o1", "o3", "o4", "gpt-5")
         if not any(model.startswith(p) for p in _no_temp):
             kwargs["temperature"] = temperature
 
@@ -230,7 +260,15 @@ class OpenAIClient:
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
                 )
-            return response.choices[0].message.content
+            text = self._extract_content_text(response)
+            if not text.strip():
+                finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+                logger.warning(
+                    "OpenAI returned empty content (model=%s, finish_reason=%s)",
+                    model,
+                    finish_reason,
+                )
+            return text
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise
@@ -261,7 +299,7 @@ class OpenAIClient:
             "messages": full_messages,
         }
 
-        _no_temp = ("o1", "o3", "o4", "gpt-5-mini", "gpt-5-nano")
+        _no_temp = ("o1", "o3", "o4", "gpt-5")
         if not any(model.startswith(p) for p in _no_temp):
             kwargs["temperature"] = temperature
 
@@ -281,9 +319,121 @@ class OpenAIClient:
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
                 )
-            return response.choices[0].message.content
+            text = self._extract_content_text(response)
+            if not text.strip():
+                finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+                logger.warning(
+                    "OpenAI returned empty content (model=%s, finish_reason=%s)",
+                    model,
+                    finish_reason,
+                )
+            return text
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
+            raise
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def complete_with_function(
+        self,
+        prompt: str,
+        function_name: str,
+        function_description: str,
+        function_parameters: Dict[str, Any],
+        system: str = None,
+        max_tokens: int = 1000,
+        temperature: float = 0.2,
+        model: str = None,
+        require_tool_call: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """Request a function/tool call and return parsed JSON arguments."""
+        config = get_config()
+        model = model or config.llm.models.researcher
+
+        get_llm_limiter().wait()
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "description": function_description,
+                    "parameters": function_parameters,
+                }
+            }],
+        }
+        if require_tool_call:
+            kwargs["tool_choice"] = {
+                "type": "function",
+                "function": {"name": function_name},
+            }
+        else:
+            kwargs["tool_choice"] = "auto"
+
+        _no_temp = ("o1", "o3", "o4", "gpt-5")
+        if not any(model.startswith(p) for p in _no_temp):
+            kwargs["temperature"] = temperature
+
+        if any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4", "gpt-4.1")):
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+            if response.usage:
+                get_token_tracker().record(
+                    model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+
+            choice = response.choices[0]
+            msg = choice.message
+            tool_calls = getattr(msg, "tool_calls", None) or []
+
+            for call in tool_calls:
+                fn = getattr(call, "function", None)
+                if fn is None:
+                    continue
+                if getattr(fn, "name", None) != function_name:
+                    continue
+                raw_args = getattr(fn, "arguments", None) or "{}"
+                try:
+                    parsed = json.loads(raw_args)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Function-call args were not valid JSON (model=%s, function=%s): %r",
+                        model, function_name, raw_args[:200]
+                    )
+                    return None
+
+            # Some models may return JSON in content even when tools are provided.
+            text = self._extract_content_text(response).strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+            finish_reason = getattr(choice, "finish_reason", "unknown")
+            logger.warning(
+                "No usable function call returned (model=%s, function=%s, finish_reason=%s)",
+                model, function_name, finish_reason,
+            )
+            return None
+        except Exception as e:
+            logger.error(f"OpenAI API error (function call): {e}")
             raise
 
 

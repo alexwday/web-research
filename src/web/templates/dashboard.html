@@ -238,18 +238,48 @@ document.addEventListener('DOMContentLoaded', function() {
     {% include "fragments/stats.html" %}
 </div>
 
-<!-- Recent activity feed (polled) -->
+<!-- Unified activity log (polled) -->
 {% if session %}
 <div class="activity-section">
-    <h3 class="activity-heading">Recent Activity</h3>
-    <div id="activity-area"
-         hx-get="/fragments/activity?session={{ session_id or '' }}"
-         hx-trigger="every 5s"
+    <h3 class="activity-heading">Activity Log</h3>
+    <div id="activity-log-area"
+         hx-get="/fragments/search-activity?session={{ session_id or '' }}"
+         hx-trigger="every 3s"
          hx-swap="innerHTML">
-        {% include "fragments/activity.html" %}
+        {% include "fragments/search_activity.html" %}
     </div>
 </div>
 {% endif %}
+
+<!-- Preserve <details> open/close state across HTMX swaps -->
+<script>
+(function() {
+    var openSet = {};
+
+    document.body.addEventListener('htmx:beforeSwap', function(e) {
+        if (!e.detail.target || e.detail.target.id !== 'activity-log-area') return;
+        // Save which details are open
+        openSet = {};
+        e.detail.target.querySelectorAll('details[data-id]').forEach(function(d) {
+            if (d.open) openSet[d.getAttribute('data-id')] = true;
+        });
+    });
+
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        if (!e.detail.target || e.detail.target.id !== 'activity-log-area') return;
+        // Restore open state
+        e.detail.target.querySelectorAll('details[data-id]').forEach(function(d) {
+            var id = d.getAttribute('data-id');
+            if (openSet[id]) {
+                d.open = true;
+            } else if (!id.startsWith('phase-')) {
+                // Non-phase items default closed; phases keep their server-side "open" attr
+                d.open = false;
+            }
+        });
+    });
+})();
+</script>
 
 <!-- Client-side elapsed timer (ticks between HTMX polls) -->
 <script>

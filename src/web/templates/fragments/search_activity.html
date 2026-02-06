@@ -1,0 +1,49 @@
+{% if phase_groups|length > 0 %}
+<div class="search-tree-totals">
+    {{ total_queries }} searches | {{ total_results }} results | {{ unique_domains }} domains
+</div>
+<div class="search-tree">
+    {% for group in phase_groups %}
+    {# Level 1: Phase #}
+    <details class="st-phase" data-id="phase-{{ group.phase_key }}" open>
+        <summary class="st-phase-header">
+            <span class="st-phase-title">{{ group.phase_label }}</span>
+            <span class="st-count">{{ group.query_count }}q / {{ group.result_count }}r</span>
+        </summary>
+
+        {% for q in group.queries %}
+        {# Level 2: Search query #}
+        <details class="st-query" data-id="q-{{ group.phase_key }}-{{ loop.index }}">
+            <summary class="st-query-header">
+                <span class="st-query-text">{{ q.query_text }}</span>
+                {% if q.task_id is not none %}
+                <span class="st-query-meta">Task {{ q.task_id }}{% if q.task_topic %}: {{ q.task_topic[:42] }}{% if q.task_topic|length > 42 %}...{% endif %}{% endif %}</span>
+                {% endif %}
+                <span class="st-count-sm">{{ q.results|length }}</span>
+            </summary>
+
+            {# Level 3: Results #}
+            {% for r in q.results %}
+            <div class="st-result">
+                <span class="st-dot {% if r.quality_score is not none %}{% if r.quality_score >= 0.8 %}dot-green{% elif r.quality_score >= 0.6 %}dot-yellow{% else %}dot-red{% endif %}{% endif %}"></span>
+                <a href="{{ r.url }}" target="_blank" rel="noopener" class="st-result-link" title="{{ r.url }}">{{ r.title[:60] }}{% if r.title|length > 60 %}...{% endif %}</a>
+                {% if r.quality_score is not none %}<span class="st-score">{{ "%.2f"|format(r.quality_score) }}</span>{% endif %}
+                {% if r.snippet %}
+                <details class="st-snippet-wrap" data-id="snip-{{ group.phase_key }}-{{ q.query_group }}-{{ loop.index }}">
+                    <summary class="st-snippet-btn">Show snippet</summary>
+                    <div class="st-snippet">{{ r.snippet[:600] }}{% if r.snippet|length > 600 %}...{% endif %}</div>
+                </details>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% if q.results|length == 0 %}
+            <div class="st-no-results">No results captured for this search yet.</div>
+            {% endif %}
+        </details>
+        {% endfor %}
+    </details>
+    {% endfor %}
+</div>
+{% else %}
+<p class="activity-empty">No activity yet.</p>
+{% endif %}

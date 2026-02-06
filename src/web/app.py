@@ -59,8 +59,11 @@ def start_research_background(query: str, overrides: dict = None) -> bool:
             _current_orchestrator = orchestrator
             try:
                 orchestrator.run(query)
-            except Exception:
-                pass  # errors are logged to file & stored in DB
+            except Exception as e:
+                from src.logger import get_logger
+                get_logger(__name__).exception(
+                    "Background research worker failed: %s", e
+                )
             finally:
                 _current_orchestrator = None
                 if overrides:

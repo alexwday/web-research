@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.utils.rbc_security import configure_rbc_security_certs
 from src.orchestrator import run_research
 from src.database import get_database, reset_database
-from src.config import load_config, get_env_settings
+from src.config import load_config, get_env_settings, set_config
+from src.llm_client import get_llm_client
 from src.logger import print_header, print_info, print_error, print_success, print_statistics_table
 
 # Enable RBC SSL certificates early (no-op if package not installed)
@@ -106,8 +107,11 @@ def status():
     
     session = db.get_current_session()
     if not session:
-        print_info("No active research session found.")
-        return
+        session = db.get_most_recent_session()
+        if not session:
+            print_info("No research session found.")
+            return
+        print_info("No active session. Showing most recent session.")
     
     print_header(
         "Research Session Status",
@@ -119,7 +123,7 @@ def status():
     console.print(f"[cyan]Started:[/cyan] {session.started_at}")
     console.print(f"[cyan]Status:[/cyan] {session.status}")
     
-    stats = db.get_statistics()
+    stats = db.get_statistics(session_id=session.id)
     print_statistics_table(stats)
 
 
@@ -174,7 +178,7 @@ def export(
     from src.compiler import ReportCompiler
 
     db = get_database()
-    session = db.get_current_session()
+    session = db.get_current_session() or db.get_most_recent_session()
 
     if not session:
         print_error("No research session found to export.")
@@ -191,6 +195,9 @@ def export(
         config.output.formats = ["markdown", "html"]
     else:
         config.output.formats = [export_format]
+
+    # Ensure compiler uses the same runtime config for this command.
+    set_config(config)
     
     compiler = ReportCompiler()
     
@@ -199,7 +206,8 @@ def export(
             session.query,
             None,
             None,
-            0
+            0,
+            session_id=session.id
         )
         
         print_success("Export completed!")
@@ -249,6 +257,108 @@ def validate():
         print_info(f"Output directory will be created: {output_dir}")
     
     print_success("\nValidation complete!")
+
+
+@app.command("model-smoke")
+def model_smoke(
+    models: str = typer.Option(
+        "gpt-4.1,gpt-5-mini,gpt-5,gpt-5.1",
+        "--models",
+        help="Comma-separated model names to probe",
+    ),
+    skip_tool_calling: bool = typer.Option(
+        False,
+        "--skip-tool-calling",
+        help="Skip tool/function-calling probe",
+    ),
+):
+    """Run a quick model compatibility smoke test for completion + tool calling."""
+    from rich.table import Table
+
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    if not model_list:
+        print_error("No models provided.")
+        raise typer.Exit(1)
+
+    settings = get_env_settings()
+    has_llm_auth = bool(settings.openai_api_key) or all([
+        settings.oauth_url, settings.oauth_client_id, settings.oauth_client_secret
+    ])
+    if not has_llm_auth:
+        print_error("No LLM auth configured: set OPENAI_API_KEY or OAuth credentials.")
+        raise typer.Exit(1)
+
+    client = get_llm_client()
+    table = Table(title="Model Smoke Test", border_style="cyan")
+    table.add_column("Model", style="cyan")
+    table.add_column("Text", justify="center")
+    table.add_column("Tool", justify="center")
+    table.add_column("Notes", style="dim")
+
+    any_fail = False
+
+    for model in model_list:
+        text_status = "fail"
+        tool_status = "skip" if skip_tool_calling else "fail"
+        notes = []
+
+        try:
+            text = client.complete(
+                prompt="Reply with exactly OK.",
+                system="You are a probe. Output only OK.",
+                max_tokens=20,
+                temperature=0.1,
+                model=model,
+            )
+            if (text or "").strip():
+                text_status = "pass"
+            else:
+                notes.append("empty text response")
+        except Exception as e:
+            notes.append(f"text error: {str(e)[:80]}")
+
+        if not skip_tool_calling:
+            try:
+                payload = client.complete_with_function(
+                    prompt="Call the function with status='ok' and message='smoke'.",
+                    system="You are a probe. Use the provided function.",
+                    function_name="emit_probe",
+                    function_description="Emit a probe payload",
+                    function_parameters={
+                        "type": "object",
+                        "properties": {
+                            "status": {"type": "string", "enum": ["ok"]},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["status", "message"],
+                        "additionalProperties": False,
+                    },
+                    max_tokens=120,
+                    temperature=0.1,
+                    model=model,
+                    require_tool_call=True,
+                )
+                if isinstance(payload, dict) and payload.get("status") == "ok":
+                    tool_status = "pass"
+                else:
+                    tool_status = "fail"
+                    notes.append(f"bad tool payload: {str(payload)[:80]}")
+            except Exception as e:
+                tool_status = "error"
+                notes.append(f"tool error: {str(e)[:80]}")
+
+        if text_status != "pass" or (not skip_tool_calling and tool_status != "pass"):
+            any_fail = True
+
+        table.add_row(model, text_status, tool_status, "; ".join(notes) if notes else "-")
+
+    console.print(table)
+
+    if any_fail:
+        print_error("One or more model probes failed.")
+        raise typer.Exit(1)
+
+    print_success("All model probes passed.")
 
 
 @app.command()

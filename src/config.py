@@ -111,11 +111,11 @@ class LLMModelsConfig(BaseModel):
 
 
 class LLMMaxTokensConfig(BaseModel):
-    planner: int = 8000
-    researcher: int = 4000
-    writer: int = 6000
-    editor: int = 8000
-    discovery: int = 4000
+    planner: int = 100_000
+    researcher: int = 100_000
+    writer: int = 100_000
+    editor: int = 100_000
+    discovery: int = 100_000
 
 
 class LLMTemperatureConfig(BaseModel):

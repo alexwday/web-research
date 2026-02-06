@@ -4,7 +4,7 @@ Coordinates the entire research process
 """
 import time
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
 from .config import get_config, TaskStatus, ResearchTask, GlossaryTerm
@@ -134,6 +134,16 @@ class ResearchOrchestrator:
     def _resume_session(self):
         """Resume an existing research session"""
         session = self.db.get_current_session()
+
+        # If no active "running" session exists, allow resuming the most
+        # recent session when it still has pending tasks.
+        if not session:
+            recent = self.db.get_most_recent_session()
+            if recent:
+                pending = self.db.get_task_count(TaskStatus.PENDING, session_id=recent.id)
+                if pending > 0:
+                    self.db.update_session(recent.id, status="running", ended_at=None)
+                    session = self.db.get_session_by_id(recent.id)
         
         if session:
             print_info(f"Resuming session #{session.id}")
@@ -179,7 +189,11 @@ class ResearchOrchestrator:
                 task = self.db.get_next_task(session_id=self.session_id)
 
                 if not task:
-                    print_success("All tasks completed!")
+                    failed = self.db.get_task_count(TaskStatus.FAILED, session_id=self.session_id)
+                    if failed > 0:
+                        print_warning(f"No pending tasks remain; {failed} task(s) failed.")
+                    else:
+                        print_success("All tasks completed!")
                     break
 
                 # Update progress
@@ -270,14 +284,17 @@ class ResearchOrchestrator:
         # Limit new tasks to remaining capacity
         tasks_to_add = new_tasks[:remaining_capacity]
         
-        for task_data in tasks_to_add:
+        for i, task_data in enumerate(tasks_to_add, start=1):
+            # Use an index to avoid file-path collisions for similarly named tasks.
+            file_index = current_count + i
             task = ResearchTask(
                 parent_id=task_data.get("parent_id"),
                 topic=task_data["topic"],
                 description=task_data.get("description", ""),
                 file_path=generate_file_path(
                     task_data["topic"],
-                    self.config.output.directory
+                    self.config.output.directory,
+                    file_index
                 ),
                 priority=task_data.get("priority", 5),
                 depth=task_data.get("depth", 1),
@@ -285,6 +302,12 @@ class ResearchOrchestrator:
             )
             
             self.db.add_task(task, self.session_id)
+
+        # Keep denormalized session task count in sync with recursive additions.
+        self.db.update_session(
+            self.session_id,
+            total_tasks=self.db.get_task_count(session_id=self.session_id)
+        )
         
         print_info(f"Added {len(tasks_to_add)} new research tasks")
     
@@ -407,13 +430,23 @@ class ResearchOrchestrator:
                 following_topics=following_topics,
             )
 
+            task_obj = chapter["task"]
+            # Persist reordered sections to deterministic numbered files so all
+            # downstream consumers (compiler/web UI) share the same ordering.
+            target_file = generate_file_path(
+                task_obj.topic,
+                self.config.output.directory,
+                i + 1
+            )
+            save_markdown(target_file, rewritten_content, append=False)
+            if task_obj.file_path != target_file:
+                self.db.update_task(task_obj.id, file_path=target_file)
+                task_obj.file_path = target_file
+
             rewritten_chapters.append({
-                "task": chapter["task"],
+                "task": task_obj,
                 "content": rewritten_content,
             })
-
-            # Save rewritten content to file
-            save_markdown(chapter["task"].file_path, rewritten_content, append=False)
 
             # Build summary of this section for the next iteration
             words = rewritten_content.split()
@@ -425,7 +458,7 @@ class ResearchOrchestrator:
                 "summary": summary,
             })
 
-            print_write(chapter["task"].file_path, count_words(rewritten_content))
+            print_write(target_file, count_words(rewritten_content))
 
         print_info("Editor rewrite pass complete")
 
@@ -541,7 +574,23 @@ class ResearchOrchestrator:
                 total_words=stats["total_words"],
                 total_sources=stats["total_sources"],
             )
-            self.db.complete_session(self.session_id)
+
+            failed = stats.get("failed_tasks", 0)
+            pending = stats.get("pending_tasks", 0)
+            if pending > 0 and failed > 0:
+                status = "partial_with_errors"
+            elif pending > 0:
+                status = "partial"
+            elif failed > 0:
+                status = "completed_with_errors"
+            else:
+                status = "completed"
+
+            self.db.update_session(
+                self.session_id,
+                status=status,
+                ended_at=datetime.now(timezone.utc)
+            )
         
         # Print completion summary
         print_completion_summary(
@@ -551,6 +600,11 @@ class ResearchOrchestrator:
             total_sources=stats["total_sources"],
             duration_seconds=duration_seconds
         )
+        if stats.get("pending_tasks", 0) > 0:
+            print_warning(
+                f"Run finished with {stats['pending_tasks']} pending task(s). "
+                "Resume to continue remaining work."
+            )
         
         # Print output file locations
         console.print("\n[bold cyan]Output Files:[/bold cyan]")

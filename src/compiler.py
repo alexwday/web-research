@@ -422,7 +422,8 @@ class ReportCompiler:
 
         # Use pre-read chapters if provided, otherwise read files
         if pre_read_chapters is not None:
-            chapters = pre_read_chapters
+            # Preserve caller-provided order (e.g., editor reorder pass)
+            chapters = list(pre_read_chapters)
         else:
             chapters = []
             for task in completed_tasks:
@@ -433,8 +434,8 @@ class ReportCompiler:
                         "content": content
                     })
 
-        # Sort by file path (which includes order number)
-        chapters.sort(key=lambda x: x["task"].file_path)
+            # Default order by file path (which includes order number)
+            chapters.sort(key=lambda x: x["task"].file_path)
 
         # Build global source list with citation remapping per chapter
         global_sources, chapters = self._build_global_sources(chapters)
@@ -565,6 +566,8 @@ class ReportCompiler:
         total_words: int
     ) -> Path:
         """Compile to Markdown format"""
+        # Keep slug generation deterministic for this output format
+        self._used_slugs = set()
         lines = []
         
         # Title
@@ -663,14 +666,20 @@ class ReportCompiler:
     ) -> Path:
         """Compile to HTML format"""
         import markdown
+
+        # Keep slug generation deterministic for this output format
+        self._used_slugs = set()
+
+        # Compute per-chapter anchors once and reuse them for TOC + headings.
+        chapter_anchors = [self._slugify(ch["task"].topic) for ch in chapters]
         
         # Build TOC
         toc = []
         if self.config.output.include_toc:
-            for chapter in chapters:
+            for chapter, anchor in zip(chapters, chapter_anchors):
                 title = chapter["task"].topic
                 toc.append({
-                    "id": self._slugify(title),
+                    "id": anchor,
                     "title": title
                 })
         
@@ -683,12 +692,10 @@ class ReportCompiler:
             content_parts.append(markdown.markdown(executive_summary))
         
         # Main chapters
-        for chapter in chapters:
+        for chapter, anchor in zip(chapters, chapter_anchors):
             task = chapter["task"]
             md_content = chapter["content"]
 
-            # Add anchor for TOC
-            anchor = self._slugify(task.topic)
             content_parts.append(f'<section>')
             content_parts.append(f'<h2 id="{anchor}">{task.topic}</h2>')
 

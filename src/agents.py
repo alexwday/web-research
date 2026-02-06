@@ -4,6 +4,7 @@ Contains the Planner, Researcher, and Editor agents
 """
 import json
 import re
+import uuid
 from typing import List, Dict, Any, Tuple
 
 from .config import get_config, ResearchTask, TaskStatus
@@ -85,6 +86,8 @@ CITATION FORMAT:
 - Direct quotes: "quoted text" [3]
 - Minimum {min_citations} citations required
 - You MUST cite from the provided sources. Do not invent citations.
+- NEVER use a citation number higher than the number of sources provided. If 3 sources are listed, only [1], [2], [3] are valid.
+- If the source material section says "WARNING" or contains no actual sources, write WITHOUT any [N] citation markers at all. Do not fabricate references.
 
 NOTE: Source content may be truncated. Do not assume you have the complete text of any source.
 
@@ -231,6 +234,22 @@ Each query MUST target a different angle (e.g., one broad overview, one specific
 Output ONLY the queries, one per line, no numbering or bullets."""
 
 
+QUERY_GENERATOR_JSON_PROMPT = """Generate {num_queries} search queries for:
+
+Topic: {topic}
+Focus: {description}
+
+Each query MUST target a different angle (e.g., broad overview, specific/technical angle, recent evidence/news angle).
+Use concise search phrasing and varied terminology.
+
+Return ONLY a JSON object in this exact shape:
+{{"queries": ["query 1", "query 2"]}}
+"""
+
+QUERY_GENERATOR_TOOL_NAME = "emit_search_queries"
+QUERY_GENERATOR_TOOL_DESC = "Return diverse web search queries for the research task."
+
+
 # =============================================================================
 # PLANNER AGENT
 # =============================================================================
@@ -254,7 +273,7 @@ class PlannerAgent:
         logger.info(f"Creating research plan for: {query[:100]}...")
 
         # Pre-search: gather web context so the planner is informed
-        search_context = self._pre_search(query)
+        search_context = self._pre_search(query, session_id=session_id)
 
         # Format the system prompt with config values
         max_initial = self.config.research.max_total_tasks
@@ -325,7 +344,7 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
             logger.error(f"Failed to create plan: {e}")
             raise
 
-    def _pre_search(self, query: str) -> str:
+    def _pre_search(self, query: str, session_id: int = None) -> str:
         """Run preliminary web searches to give the planner real-world context.
 
         Executes 2 searches: one broad overview query and one more specific
@@ -333,22 +352,40 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
         """
         logger.info("Running pre-planning web searches...")
 
+        # Build a short variant for the second query so the two searches
+        # are visibly different in the activity log (long queries get
+        # CSS-truncated and can look identical).
+        short_query = query[:80].rstrip() if len(query) > 80 else query
         queries = [
             query,
-            f"{query} key topics overview",
+            f"{short_query} key topics overview",
         ]
 
         seen_urls = set()
         results = []
 
         for q in queries:
+            qg = uuid.uuid4().hex[:12]
             print_search(f"[pre-plan] {q}")
+            # Log query event
+            self.db.add_search_event(
+                session_id=session_id, task_id=None,
+                event_type="query", query_group=qg, query_text=q,
+            )
             hits = web_search(q, max_results=5)
             for hit in hits:
                 url = hit.get("url", "")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     results.append(hit)
+                    # Log result event
+                    self.db.add_search_event(
+                        session_id=session_id, task_id=None,
+                        event_type="result", query_group=qg,
+                        url=url,
+                        title=hit.get("title", ""),
+                        snippet=hit.get("snippet", ""),
+                    )
 
         if not results:
             logger.warning("Pre-planning search returned no results")
@@ -469,21 +506,29 @@ class ResearcherAgent:
             queries = self._generate_queries(task)
 
             # Step 2: Execute searches and gather content
-            search_context = self._execute_searches(queries, task.id)
+            search_context = self._execute_searches(queries, task.id, session_id=session_id)
 
             # Handle empty search results
-            if not search_context or not search_context.strip():
+            has_sources = bool(search_context and search_context.strip())
+            if not has_sources:
                 logger.warning(f"No sources found for task: {task.topic}")
                 search_context = (
                     "WARNING: No source material was found for this topic. "
-                    "Write based on your training knowledge and clearly note "
-                    "that sources were unavailable."
+                    "Write based on your training knowledge. "
+                    "Do NOT include any [N] citation markers."
                 )
 
             # Step 3: Synthesize and write
             content, new_tasks, glossary_terms = self._synthesize(
                 task, search_context, overall_query, other_sections, session_id=session_id
             )
+
+            # Safety net: strip phantom citations if task has no real sources
+            if not has_sources:
+                stripped = re.sub(r'(?<!\])\[(\d+)\](?!\()', '', content)
+                if stripped != content:
+                    logger.warning(f"Stripped phantom citations from sourceless task {task.id}")
+                    content = stripped
 
             return content, new_tasks, glossary_terms
 
@@ -492,66 +537,278 @@ class ResearcherAgent:
             raise
     
     def _generate_queries(self, task: ResearchTask) -> List[str]:
-        """Generate search queries for the task"""
-        prompt = QUERY_GENERATOR_PROMPT.format(
-            num_queries=self.config.search.queries_per_task,
+        """Generate search queries for the task.
+
+        Retries once on empty LLM response, then falls back to a
+        synthetic query derived from the task topic and description.
+        """
+        num_queries = max(1, self.config.search.queries_per_task)
+        logger.info(f"Generating {num_queries} queries for: {task.topic[:60]}")
+
+        tool_schema = {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": max(num_queries, 8),
+                }
+            },
+            "required": ["queries"],
+            "additionalProperties": False,
+        }
+
+        # Attempt 0: native tool/function call for structured output.
+        try:
+            tool_payload = self.client.complete_with_function(
+                prompt=QUERY_GENERATOR_JSON_PROMPT.format(
+                    num_queries=num_queries,
+                    topic=task.topic,
+                    description=task.description
+                ),
+                system=QUERY_GENERATOR_SYSTEM,
+                function_name=QUERY_GENERATOR_TOOL_NAME,
+                function_description=QUERY_GENERATOR_TOOL_DESC,
+                function_parameters=tool_schema,
+                max_tokens=self.config.llm.max_tokens.researcher,
+                temperature=0.3,
+                model=self.config.llm.models.researcher,
+                require_tool_call=True,
+            )
+            if tool_payload:
+                logger.info(f"Query generator tool payload: {str(tool_payload)[:200]!r}")
+                result = self._parse_query_response(json.dumps(tool_payload), num_queries)
+                if result:
+                    if len(result) < num_queries:
+                        for q in self._build_fallback_queries(task, num_queries):
+                            if q.lower() not in {x.lower() for x in result}:
+                                result.append(q)
+                            if len(result) >= num_queries:
+                                break
+                    logger.info(f"Parsed {len(result)} queries (tool): {result}")
+                    return result
+        except Exception as e:
+            logger.warning(f"Tool-based query generation failed; falling back: {e}")
+
+        json_prompt = QUERY_GENERATOR_JSON_PROMPT.format(
+            num_queries=num_queries,
             topic=task.topic,
             description=task.description
         )
 
-        response = self.client.complete(
-            prompt=prompt,
-            system=QUERY_GENERATOR_SYSTEM,
-            max_tokens=500,
-            temperature=0.5,
-            model=self.config.llm.models.researcher
+        base_prompt = QUERY_GENERATOR_PROMPT.format(
+            num_queries=num_queries,
+            topic=task.topic,
+            description=task.description
         )
-        
-        # Parse queries (one per line)
-        queries = [q.strip() for q in response.strip().split('\n') if q.strip()]
-        
-        # Remove any numbering or bullets
-        queries = [re.sub(r'^[\d\.\-\*\•]+\s*', '', q) for q in queries]
-        
-        return queries[:self.config.search.queries_per_task]
+
+        attempts = [
+            {
+                "prompt": json_prompt,
+                "json_mode": True,
+                "label": "json",
+            },
+            {
+                "prompt": (
+                    base_prompt
+                    + "\n\nIMPORTANT: Return at least one concrete search query. "
+                    + "Do not return blank output."
+                ),
+                "json_mode": False,
+                "label": "text",
+            },
+        ]
+
+        for attempt_idx, attempt in enumerate(attempts, start=1):
+            response = self.client.complete(
+                prompt=attempt["prompt"],
+                system=QUERY_GENERATOR_SYSTEM,
+                max_tokens=self.config.llm.max_tokens.researcher,
+                temperature=0.5 + ((attempt_idx - 1) * 0.2),
+                json_mode=attempt["json_mode"],
+                model=self.config.llm.models.researcher
+            )
+
+            response_text = (response or "").strip()
+            logger.info(
+                f"Query generator raw response (attempt {attempt_idx}, {attempt['label']}): "
+                f"{response_text[:200]!r}"
+            )
+
+            result = self._parse_query_response(response_text, num_queries)
+            if result:
+                if len(result) < num_queries:
+                    # Fill short outputs deterministically so downstream stages
+                    # always run with the configured query count.
+                    for q in self._build_fallback_queries(task, num_queries):
+                        if q.lower() not in {x.lower() for x in result}:
+                            result.append(q)
+                        if len(result) >= num_queries:
+                            break
+                logger.info(f"Parsed {len(result)} queries: {result}")
+                return result
+
+            logger.warning(f"Query generator returned empty (attempt {attempt_idx})")
+
+        fallback_queries = self._build_fallback_queries(task, num_queries)
+        logger.warning(f"Using fallback queries: {fallback_queries}")
+        return fallback_queries
+
+    def _parse_query_response(self, response: str, num_queries: int) -> List[str]:
+        """Parse query-generation output from plain text, fenced blocks, or JSON."""
+        if not response:
+            return []
+
+        text = response.strip()
+
+        # Accept fenced output and extract inner content.
+        fenced = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+
+        candidates: List[str] = []
+
+        # Try JSON first.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                candidates = [str(item) for item in parsed]
+            elif isinstance(parsed, dict):
+                val = (
+                    parsed.get("queries")
+                    or parsed.get("search_queries")
+                    or parsed.get("query")
+                )
+                if isinstance(val, list):
+                    candidates = [str(item) for item in val]
+                elif isinstance(val, str):
+                    candidates = [val]
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback to line parsing.
+        if not candidates:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if len(lines) == 1 and num_queries > 1 and any(sep in lines[0] for sep in (";", "|")):
+                lines = [part.strip() for part in re.split(r"[;|]", lines[0]) if part.strip()]
+            candidates = lines
+
+        cleaned: List[str] = []
+        seen = set()
+
+        for candidate in candidates:
+            q = candidate.strip().strip("`").strip()
+            q = re.sub(r'^[\d\)\.\-\*\•]+\s*', '', q)
+            q = re.sub(r'^queries?\s*:\s*', '', q, flags=re.IGNORECASE)
+            q = q.strip().strip('"').strip("'")
+            q = re.sub(r'\s+', ' ', q)
+            if not q:
+                continue
+
+            key = q.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(q)
+
+            if len(cleaned) >= num_queries:
+                break
+
+        return cleaned
+
+    def _build_fallback_queries(self, task: ResearchTask, num_queries: int) -> List[str]:
+        """Build deterministic fallback queries when the model returns no usable output."""
+        topic = " ".join(task.topic.split())
+        desc = " ".join(task.description.split())
+        desc_short = " ".join(desc.split()[:12])
+
+        candidates = [
+            topic,
+            f"{topic} overview",
+            f"{topic} key themes analysis",
+            f"{topic} recent evidence studies",
+            f"{topic} case studies",
+        ]
+        if desc_short:
+            candidates.insert(1, f"{topic} {desc_short}")
+
+        fallbacks: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            query = " ".join(candidate.split()[:12]).strip()
+            if not query:
+                continue
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            fallbacks.append(query)
+            if len(fallbacks) >= num_queries:
+                break
+
+        if not fallbacks:
+            fallbacks = [topic[:120].strip() or "research topic overview"]
+
+        return fallbacks
     
-    def _execute_searches(self, queries: List[str], task_id: int) -> str:
+    def _execute_searches(self, queries: List[str], task_id: int, session_id: int = None) -> str:
         """Execute searches and aggregate results"""
+        logger.info(f"Executing searches with {len(queries)} queries")
         all_results = []
         seen_urls = set()
-        
+
         for query in queries:
+            qg = uuid.uuid4().hex[:12]
             print_search(query)
+            logger.info(f"Searching: {query}")
+            # Log query event
+            self.db.add_search_event(
+                session_id=session_id, task_id=task_id,
+                event_type="query", query_group=qg, query_text=query,
+            )
             results = web_search(query)
-            
+            logger.info(f"Search returned {len(results)} results")
+
             for r in results:
                 url = r.get('url', '')
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_results.append(r)
-        
+                    # Log result event
+                    self.db.add_search_event(
+                        session_id=session_id, task_id=task_id,
+                        event_type="result", query_group=qg,
+                        url=url,
+                        title=r.get('title', ''),
+                        snippet=r.get('snippet', ''),
+                    )
+
+        logger.info(f"Total unique results: {len(all_results)}")
+
         # Extract full content from top results
         context_parts = []
         sources_added = 0
         max_sources = self.config.search.max_results
-        
+
         for result in all_results[:max_sources * 2]:  # Check more than needed
             url = result.get('url', '')
             if not url:
                 continue
-            
+
             try:
                 print_scrape(url)
                 source = extract_source_info(url, result)
-                
+                logger.info(f"Source: {url[:60]} quality={source.quality_score} content_len={len(source.full_content or '')}")
+
                 # Check quality threshold
                 if source.quality_score < self.config.quality.min_source_quality:
-                    logger.debug(f"Skipping low-quality source: {url}")
+                    logger.info(f"Skipping low-quality source: {url}")
                     continue
-                
+
                 # Save source to database (position preserves citation order)
                 self.db.add_source(source, task_id, position=sources_added)
-                
+
                 # Build context — use configured max_content_length
                 content = source.full_content or source.snippet or ""
                 max_len = self.config.scraping.max_content_length
@@ -568,14 +825,14 @@ Domain: {source.domain}
 {content_str}
 """)
                     sources_added += 1
-                    
+
                     if sources_added >= max_sources:
                         break
-                        
+
             except Exception as e:
                 logger.warning(f"Failed to extract from {url}: {e}")
                 continue
-        
+
         return "\n\n---\n\n".join(context_parts)
     
     def _synthesize(
@@ -1008,7 +1265,7 @@ Reorder them for the best logical flow and reading experience."""
             response = self.client.complete(
                 prompt=prompt,
                 system=REORDER_SYSTEM_PROMPT,
-                max_tokens=2000,
+                max_tokens=self.config.llm.max_tokens.editor,
                 temperature=0.1,
                 json_mode=True,
                 model=self.config.llm.models.editor

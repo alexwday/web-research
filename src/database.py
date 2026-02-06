@@ -127,6 +127,23 @@ class GlossaryModel(Base):
         )
 
 
+class SearchEventModel(Base):
+    """SQLAlchemy model for search activity events (queries and results)"""
+    __tablename__ = 'search_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Integer, ForeignKey('sessions.id'), nullable=True)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)  # null = planning phase
+    event_type = Column(String(20), nullable=False)  # "query" or "result"
+    query_group = Column(String(50), nullable=False)  # links results to their parent query
+    query_text = Column(String(1000), nullable=True)
+    url = Column(String(2000), nullable=True)
+    title = Column(String(500), nullable=True)
+    snippet = Column(Text, nullable=True)
+    quality_score = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class SessionModel(Base):
     """SQLAlchemy model for research sessions"""
     __tablename__ = 'sessions'
@@ -585,6 +602,24 @@ class DatabaseManager:
             ).order_by(GlossaryModel.term).all()
             return [r.to_pydantic() for r in results]
     
+    # =========================================================================
+    # SEARCH EVENT OPERATIONS
+    # =========================================================================
+
+    def add_search_event(self, **kwargs) -> None:
+        """Insert a search event (query or result)."""
+        with self.get_sync_session() as session:
+            event = SearchEventModel(**kwargs)
+            session.add(event)
+            session.commit()
+
+    def get_search_events(self, session_id: int) -> List[SearchEventModel]:
+        """Get all search events for a session, ordered by created_at."""
+        with self.get_sync_session() as session:
+            return session.query(SearchEventModel).filter(
+                SearchEventModel.session_id == session_id
+            ).order_by(SearchEventModel.created_at).all()
+
     # =========================================================================
     # STATISTICS
     # =========================================================================

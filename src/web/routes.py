@@ -9,6 +9,8 @@ Covers:
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from collections import OrderedDict
+from urllib.parse import urlparse
 
 import markdown as md
 from fastapi import APIRouter, Request, HTTPException
@@ -19,8 +21,6 @@ from src.config import TaskStatus, ResearchSession, RESEARCH_PRESETS
 from src.database import get_database
 from src.llm_client import get_token_tracker
 from src.tools import read_file
-
-from . import app as app_module  # for thread helpers
 
 router = APIRouter()
 
@@ -36,8 +36,14 @@ def _db():
     return get_database()
 
 
+def _app():
+    """Lazy import to avoid circular dependency with app.py."""
+    from . import app as app_module
+    return app_module
+
+
 def _is_running() -> bool:
-    return app_module.is_research_running()
+    return _app().is_research_running()
 
 
 def _resolve_session(session_param: Optional[int] = None) -> Optional[ResearchSession]:
@@ -50,6 +56,120 @@ def _resolve_session(session_param: Optional[int] = None) -> Optional[ResearchSe
     if running:
         return running
     return db.get_most_recent_session()
+
+
+def _empty_activity_log_context() -> dict:
+    return {
+        "phase_groups": [],
+        "total_queries": 0,
+        "total_results": 0,
+        "unique_domains": 0,
+    }
+
+
+def _build_activity_log_context(session_id: Optional[int]) -> dict:
+    """Build nested activity data: phase -> query -> result."""
+    if not session_id:
+        return _empty_activity_log_context()
+
+    db = _db()
+    events = db.get_search_events(session_id)
+    if not events:
+        return _empty_activity_log_context()
+
+    task_topics = {t.id: t.topic for t in db.get_all_tasks(session_id=session_id)}
+    phase_map = OrderedDict(
+        [
+            (
+                "planning",
+                {
+                    "phase_key": "planning",
+                    "phase_label": "Planning Phase",
+                    "queries": [],
+                    "query_count": 0,
+                    "result_count": 0,
+                },
+            ),
+            (
+                "research",
+                {
+                    "phase_key": "research",
+                    "phase_label": "Research Phase",
+                    "queries": [],
+                    "query_count": 0,
+                    "result_count": 0,
+                },
+            ),
+        ]
+    )
+
+    query_map = {}
+    total_queries = 0
+    total_results = 0
+    domains = set()
+
+    for ev in events:
+        phase_key = "planning" if ev.task_id is None else "research"
+        phase_group = phase_map[phase_key]
+        query_key = f"{phase_key}:{ev.task_id or 0}:{ev.query_group}"
+
+        if ev.event_type == "query":
+            total_queries += 1
+            phase_group["query_count"] += 1
+            q_entry = {
+                "query_group": ev.query_group,
+                "query_text": (ev.query_text or "").strip() or "(query unavailable)",
+                "results": [],
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+            }
+            query_map[query_key] = q_entry
+            phase_group["queries"].append(q_entry)
+            continue
+
+        if ev.event_type != "result":
+            continue
+
+        total_results += 1
+        phase_group["result_count"] += 1
+        if ev.url:
+            try:
+                netloc = urlparse(ev.url).netloc
+                if netloc:
+                    domains.add(netloc)
+            except Exception:
+                pass
+
+        q_entry = query_map.get(query_key)
+        if not q_entry:
+            q_entry = {
+                "query_group": ev.query_group,
+                "query_text": "(query unavailable)",
+                "results": [],
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+            }
+            query_map[query_key] = q_entry
+            phase_group["queries"].append(q_entry)
+
+        q_entry["results"].append(
+            {
+                "url": ev.url or "",
+                "title": ev.title or "Untitled",
+                "snippet": ev.snippet or "",
+                "quality_score": ev.quality_score,
+            }
+        )
+
+    phase_groups = [
+        g for g in phase_map.values() if g["queries"] or g["query_count"] or g["result_count"]
+    ]
+    return {
+        "phase_groups": phase_groups,
+        "total_queries": total_queries,
+        "total_results": total_results,
+        "unique_domains": len(domains),
+    }
 
 
 # =========================================================================
@@ -91,12 +211,12 @@ async def dashboard(request: Request, session: Optional[int] = None):
     progress_pct = int((completed / total) * 100) if total > 0 else 0
 
     # Phase, current task, elapsed time
-    phase = app_module.get_current_phase()
+    phase = _app().get_current_phase()
     current_task = db.get_in_progress_task(session_id=sid) if sid else None
     elapsed_seconds = 0
     if resolved and resolved.started_at:
         elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
-    recent_tasks = db.get_recent_completed_tasks(limit=5, session_id=sid) if sid else []
+    activity_log = _build_activity_log_context(sid)
 
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
@@ -110,7 +230,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
         "phase": phase,
         "current_task": current_task,
         "elapsed_seconds": elapsed_seconds,
-        "recent_tasks": recent_tasks,
+        **activity_log,
     })
 
 
@@ -161,27 +281,71 @@ async def sources_page(request: Request, session: Optional[int] = None):
     })
 
 
-def _build_report_sections(session_id: int = None) -> list:
-    """Build the sorted list of report sections from completed tasks."""
+def _build_report_sections(session_id: int = None):
+    """Build sorted report sections with globally-remapped citations.
+
+    Returns (sections, global_sources) where citations in each section's
+    HTML match the global bibliography numbering.
+    """
+    import re
+    _CITATION_RE = re.compile(r'(?<!\])\[(\d+)\](?!\()')
+
     db = _db()
     tasks = db.get_all_tasks(TaskStatus.COMPLETED, session_id=session_id)
 
-    sections = []
+    # First pass: read content and collect per-task sources
+    raw_sections = []
     for task in tasks:
         content = read_file(task.file_path)
         if content:
-            html = md.markdown(content, extensions=["tables", "fenced_code", "toc"])
-            sections.append({
+            raw_sections.append({
                 "id": task.id,
                 "topic": task.topic,
-                "html": html,
+                "content": content,
                 "word_count": task.word_count,
                 "citation_count": task.citation_count,
                 "priority": task.priority,
+                "file_path": task.file_path,
             })
 
-    sections.sort(key=lambda s: s["priority"], reverse=True)
-    return sections
+    # Match compiler ordering (numeric prefix in file path).
+    raw_sections.sort(key=lambda s: s["file_path"])
+
+    # Build global deduplicated source list and remap citations
+    global_sources = []
+    url_to_global = {}  # url -> 1-indexed global number
+
+    sections = []
+    for section in raw_sections:
+        task_sources = db.get_sources_for_task(section["id"])
+
+        # Build local-to-global mapping for this section
+        local_to_global = {}
+        for local_idx, source in enumerate(task_sources, 1):
+            if source.url not in url_to_global:
+                global_sources.append(source)
+                url_to_global[source.url] = len(global_sources)
+            local_to_global[local_idx] = url_to_global[source.url]
+
+        # Remap citations in markdown content before converting to HTML
+        content = section["content"]
+        if local_to_global:
+            def _replace(match, mapping=local_to_global):
+                local_num = int(match.group(1))
+                return f"[{mapping.get(local_num, local_num)}]"
+            content = _CITATION_RE.sub(_replace, content)
+
+        html = md.markdown(content, extensions=["tables", "fenced_code", "toc"])
+        sections.append({
+            "id": section["id"],
+            "topic": section["topic"],
+            "html": html,
+            "word_count": section["word_count"],
+            "citation_count": section["citation_count"],
+            "priority": section["priority"],
+        })
+
+    return sections, global_sources
 
 
 @router.get("/report", response_class=HTMLResponse)
@@ -195,14 +359,11 @@ async def report_page(
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
 
-    sections = _build_report_sections(session_id=sid)
+    sections, global_sources = _build_report_sections(session_id=sid)
     stats = db.get_statistics(session_id=sid)
 
-    # Get session-scoped sources for bibliography
-    if sid is not None:
-        sources = db.get_sources_for_session(sid)
-    else:
-        sources = db.get_all_sources()
+    # Use globally-ordered sources for bibliography (matches citation numbers)
+    sources = global_sources
 
     # Executive summary & conclusion from session
     exec_summary_html = None
@@ -379,7 +540,7 @@ async def api_research_start(request: Request):
         if "." in key and key.split(".")[0] in ("research", "search"):
             overrides[key] = value
 
-    started = app_module.start_research_background(query, overrides=overrides or None)
+    started = _app().start_research_background(query, overrides=overrides or None)
     if not started:
         raise HTTPException(409, "Research is already running")
 
@@ -388,7 +549,7 @@ async def api_research_start(request: Request):
 
 @router.post("/api/research/stop")
 async def api_research_stop():
-    stopped = app_module.stop_research()
+    stopped = _app().stop_research()
     return {"status": "stopping" if stopped else "not_running"}
 
 
@@ -442,7 +603,7 @@ async def fragment_task_list(request: Request, status: Optional[str] = None, ses
 async def fragment_report_page(request: Request, page: int = 0, session: Optional[int] = None):
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
-    sections = _build_report_sections(session_id=sid)
+    sections, _ = _build_report_sections(session_id=sid)
     total = len(sections)
 
     if total == 0:
@@ -475,7 +636,7 @@ async def fragment_progress(request: Request, session: Optional[int] = None):
     progress_pct = int((completed / total) * 100) if total > 0 else 0
 
     # Phase and current task
-    phase = app_module.get_current_phase()
+    phase = _app().get_current_phase()
     current_task = db.get_in_progress_task(session_id=sid) if sid else None
 
     # Elapsed time (seconds since session started)
@@ -504,4 +665,15 @@ async def fragment_activity(request: Request, session: Optional[int] = None):
     return templates.TemplateResponse("fragments/activity.html", {
         "request": request,
         "recent_tasks": recent,
+    })
+
+
+@router.get("/fragments/search-activity", response_class=HTMLResponse)
+async def fragment_search_activity(request: Request, session: Optional[int] = None):
+    resolved = _resolve_session(session)
+    sid = resolved.id if resolved else None
+    activity_log = _build_activity_log_context(sid)
+    return templates.TemplateResponse("fragments/search_activity.html", {
+        "request": request,
+        **activity_log,
     })
