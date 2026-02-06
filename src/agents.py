@@ -564,68 +564,135 @@ If you discover important sub-topics that need separate investigation, include t
         content = response
         new_tasks = []
         glossary_terms = []
-        
+
         # Check recursion depth
         can_recurse = (
             self.config.research.enable_recursion and
             task.depth < self.config.research.max_recursion_depth
         )
-        
+
         # Check total task limit
         total_tasks = self.db.get_task_count(session_id=session_id)
         at_task_limit = total_tasks >= self.config.research.max_total_tasks
-        
-        # Try to extract JSON block — handle both fenced (```json...```) and naked JSON
-        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-        if not json_match:
-            # Look for naked JSON containing new_tasks or glossary_terms near end of response
-            json_match = re.search(
-                r'(\{\s*"(?:new_tasks|glossary_terms)".*\})\s*$',
-                response, re.DOTALL
-            )
 
-        if json_match:
-            try:
-                json_str = json_match.group(1)
-                data = json.loads(json_str)
+        # Try to extract JSON metadata block
+        data, json_start_pos = self._extract_json_metadata(response)
 
-                # Extract new tasks if allowed - LIMIT TO 1 MAX
-                if can_recurse and not at_task_limit:
-                    raw_tasks = data.get("new_tasks", [])
-                    for t in raw_tasks[:1]:
-                        if isinstance(t, dict) and "topic" in t:
-                            topic = t["topic"]
-                            existing_tasks = self.db.get_all_tasks(session_id=session_id)
-                            is_duplicate = any(
-                                topic.lower() in et.topic.lower() or et.topic.lower() in topic.lower()
-                                for et in existing_tasks
-                            )
+        if data is not None:
+            # Extract new tasks if allowed - LIMIT TO 1 MAX
+            if can_recurse and not at_task_limit:
+                raw_tasks = data.get("new_tasks", [])
+                for t in raw_tasks[:1]:
+                    if isinstance(t, dict) and "topic" in t:
+                        topic = t["topic"]
+                        existing_tasks = self.db.get_all_tasks(session_id=session_id)
+                        is_duplicate = any(
+                            topic.lower() in et.topic.lower() or et.topic.lower() in topic.lower()
+                            for et in existing_tasks
+                        )
 
-                            if not is_duplicate:
-                                new_tasks.append({
-                                    "topic": topic,
-                                    "description": t.get("description", ""),
-                                    "priority": min(t.get("priority", 3), 4),
-                                    "parent_id": task.id,
-                                    "depth": task.depth + 1
-                                })
+                        if not is_duplicate:
+                            new_tasks.append({
+                                "topic": topic,
+                                "description": t.get("description", ""),
+                                "priority": min(t.get("priority", 3), 4),
+                                "parent_id": task.id,
+                                "depth": task.depth + 1
+                            })
 
-                # Extract glossary terms
-                raw_glossary = data.get("glossary_terms", [])
-                for g in raw_glossary:
-                    if isinstance(g, dict) and "term" in g and "definition" in g:
-                        glossary_terms.append({
-                            "term": g["term"],
-                            "definition": g["definition"]
-                        })
+            # Extract glossary terms
+            raw_glossary = data.get("glossary_terms", [])
+            for g in raw_glossary:
+                if isinstance(g, dict) and "term" in g and "definition" in g:
+                    glossary_terms.append({
+                        "term": g["term"],
+                        "definition": g["definition"]
+                    })
 
-                # Remove JSON block from content
-                content = response[:json_match.start()].strip()
+            # Remove JSON block from content
+            content = response[:json_start_pos].strip()
 
-            except (json.JSONDecodeError, AttributeError) as e:
-                logger.debug(f"Could not parse JSON block: {e}")
-        
         return content, new_tasks, glossary_terms
+
+    def _extract_json_metadata(self, response: str) -> Tuple[dict, int]:
+        """Extract a JSON metadata block (new_tasks / glossary_terms) from response.
+
+        Tries three strategies in order:
+        1. Fenced ```json ... ``` block
+        2. Fenced ``` ... ``` block whose content is JSON with expected keys
+        3. Naked JSON found by key marker + brace-counting (handles trailing text)
+
+        Returns (parsed_dict, start_position) or (None, -1).
+        """
+        _EXPECTED_KEYS = ('new_tasks', 'glossary_terms')
+
+        # Method 1 & 2: fenced code blocks (```json or plain ```)
+        # Iterate all fenced blocks; keep the last valid one (closest to end).
+        json_data, json_pos = None, -1
+        for fenced in re.finditer(r'```(?:json)?\s*\n?(.*?)\s*```', response, re.DOTALL):
+            candidate = fenced.group(1).strip()
+            if not candidate.startswith('{'):
+                continue
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict) and any(k in parsed for k in _EXPECTED_KEYS):
+                    json_data = parsed
+                    json_pos = fenced.start()
+            except json.JSONDecodeError:
+                continue
+
+        if json_data is not None:
+            return json_data, json_pos
+
+        # Method 3: naked JSON — search backwards for key marker, brace-count
+        for key in ('"new_tasks"', '"glossary_terms"'):
+            idx = response.rfind(key)
+            if idx == -1:
+                continue
+            open_idx = response.rfind('{', 0, idx)
+            if open_idx == -1:
+                continue
+            end_idx = self._find_matching_brace(response, open_idx)
+            if end_idx is None:
+                continue
+            try:
+                parsed = json.loads(response[open_idx:end_idx])
+                if isinstance(parsed, dict) and any(k in parsed for k in _EXPECTED_KEYS):
+                    return parsed, open_idx
+            except json.JSONDecodeError:
+                continue
+
+        return None, -1
+
+    @staticmethod
+    def _find_matching_brace(text: str, start: int) -> int:
+        """Return index after the closing } that matches text[start] == '{'.
+
+        Returns None if no matching brace is found.
+        """
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        return None
 
 
 # =============================================================================
