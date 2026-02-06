@@ -12,10 +12,14 @@ from rich.prompt import Prompt, Confirm
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from src.utils.rbc_security import configure_rbc_security_certs
 from src.orchestrator import run_research
 from src.database import get_database, reset_database
 from src.config import load_config, get_env_settings
 from src.logger import print_header, print_info, print_error, print_success, print_statistics_table
+
+# Enable RBC SSL certificates early (no-op if package not installed)
+configure_rbc_security_certs()
 
 app = typer.Typer(
     name="deep-research",
@@ -264,12 +268,18 @@ def _validate_api_keys(settings, verbose: bool = False) -> bool:
     """Validate that required API keys are set"""
     valid = True
 
-    # Check OpenAI key
-    if settings.openai_api_key:
+    # Check OpenAI / OAuth credentials
+    has_api_key = bool(settings.openai_api_key)
+    has_oauth = all([settings.oauth_url, settings.oauth_client_id, settings.oauth_client_secret])
+
+    if has_api_key:
         if verbose:
-            print_success("OPENAI_API_KEY is set")
+            print_success("OPENAI_API_KEY is set (local mode)")
+    elif has_oauth:
+        if verbose:
+            print_success("OAuth credentials set (corporate mode)")
     else:
-        print_error("OPENAI_API_KEY is not set")
+        print_error("No LLM auth configured: set OPENAI_API_KEY or OAuth credentials (OAUTH_URL, CLIENT_ID, CLIENT_SECRET)")
         valid = False
 
     # Check Tavily key

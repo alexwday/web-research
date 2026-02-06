@@ -1,7 +1,8 @@
 """
 LLM Client Module for Deep Research Agent
-Uses OpenAI API
+Uses OpenAI API with support for direct API key or OAuth2 token auth.
 """
+import os
 import threading
 import time
 from typing import Optional, List, Dict
@@ -9,6 +10,8 @@ from typing import Optional, List, Dict
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import get_config, get_env_settings
+from .oauth import fetch_oauth_token
+from .utils.rbc_security import configure_rbc_security_certs
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,16 +135,22 @@ def get_llm_limiter() -> LLMRateLimiter:
 # =============================================================================
 
 class OpenAIClient:
-    """Client for OpenAI API"""
+    """Client for OpenAI API (supports direct API key and OAuth2 token auth)"""
 
     def __init__(self):
-        settings = get_env_settings()
-        if not settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY not set in environment")
+        configure_rbc_security_certs()
+
+        token, auth_info = fetch_oauth_token()
+        base_url = os.getenv("AZURE_BASE_URL") or "https://api.openai.com/v1"
+
+        logger.info(
+            "OpenAI client init: auth=%s, base_url=%s",
+            auth_info.get("method"), base_url,
+        )
 
         try:
             from openai import OpenAI
-            self.client = OpenAI(api_key=settings.openai_api_key)
+            self.client = OpenAI(api_key=token, base_url=base_url)
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
 

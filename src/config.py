@@ -212,6 +212,12 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
     tavily_api_key: Optional[str] = Field(default=None, alias="TAVILY_API_KEY")
 
+    # OAuth / Azure endpoint (corporate environment)
+    oauth_url: Optional[str] = Field(default=None, alias="OAUTH_URL")
+    oauth_client_id: Optional[str] = Field(default=None, alias="CLIENT_ID")
+    oauth_client_secret: Optional[str] = Field(default=None, alias="CLIENT_SECRET")
+    azure_base_url: Optional[str] = Field(default=None, alias="AZURE_BASE_URL")
+
     class Config:
         env_file = ".env"
         extra = "ignore"

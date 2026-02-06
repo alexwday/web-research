@@ -43,6 +43,10 @@ def start_research_background(query: str, overrides: dict = None) -> bool:
             import src.logger as _logger_mod
             _logger_mod.console = type(_logger_mod.console)(file=io.StringIO())
 
+            # Enable RBC SSL certs if available (needed in worker thread)
+            from src.utils.rbc_security import configure_rbc_security_certs
+            configure_rbc_security_certs()
+
             from src.config import get_config, set_config, apply_overrides
             from src.orchestrator import ResearchOrchestrator
 
