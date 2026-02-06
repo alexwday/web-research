@@ -12,6 +12,17 @@
         </summary>
 
         {% for q in group.queries %}
+        {% if group.phase_key == 'compilation' %}
+        {# Compilation phase: simple action entries (no search results) #}
+        <div class="st-query st-action" data-id="q-{{ group.phase_key }}-{{ loop.index }}">
+            <div class="st-query-header">
+                <span class="st-query-text">{{ q.query_text }}</span>
+                {% if q.task_topic %}
+                <span class="st-query-meta">{{ q.task_topic[:42] }}{% if q.task_topic|length > 42 %}...{% endif %}</span>
+                {% endif %}
+            </div>
+        </div>
+        {% else %}
         {# Level 2: Search query #}
         <details class="st-query" data-id="q-{{ group.phase_key }}-{{ loop.index }}">
             <summary class="st-query-header">
@@ -40,6 +51,7 @@
             <div class="st-no-results">No results captured for this search yet.</div>
             {% endif %}
         </details>
+        {% endif %}
         {% endfor %}
     </details>
     {% endfor %}

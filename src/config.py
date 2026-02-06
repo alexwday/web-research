@@ -167,6 +167,7 @@ class ResearchConfig(BaseModel):
     task_delay: int = 2
     max_runtime_hours: int = 24
     max_loops: int = -1  # -1 = infinite, 0 = do nothing
+    max_concurrent_tasks: int = 3  # number of research tasks to run in parallel
 
 
 class OutputConfig(BaseModel):
@@ -390,6 +391,7 @@ RESEARCH_PRESETS = {
             "research.max_recursion_depth": 0,
             "research.max_runtime_hours": 1,
             "research.max_loops": 5,
+            "research.max_concurrent_tasks": 1,
             "search.queries_per_task": 1,
             "search.max_results": 3,
             "discovery.enabled": False,
@@ -409,6 +411,7 @@ RESEARCH_PRESETS = {
             "research.max_recursion_depth": 1,
             "research.max_runtime_hours": 6,
             "research.max_loops": 15,
+            "research.max_concurrent_tasks": 2,
             "search.queries_per_task": 2,
             "search.max_results": 5,
             "discovery.enabled": True,
@@ -430,6 +433,7 @@ RESEARCH_PRESETS = {
             "research.max_recursion_depth": 2,
             "research.max_runtime_hours": 24,
             "research.max_loops": 30,
+            "research.max_concurrent_tasks": 3,
             "search.queries_per_task": 3,
             "search.max_results": 8,
             "discovery.enabled": True,
@@ -451,6 +455,7 @@ RESEARCH_PRESETS = {
             "research.max_recursion_depth": 3,
             "research.max_runtime_hours": 48,
             "research.max_loops": 50,
+            "research.max_concurrent_tasks": 4,
             "search.queries_per_task": 4,
             "search.max_results": 10,
             "discovery.enabled": True,

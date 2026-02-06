@@ -4,6 +4,7 @@ Coordinates the entire research process
 """
 import time
 import signal
+from concurrent.futures import ThreadPoolExecutor, wait, as_completed, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
@@ -157,8 +158,40 @@ class ResearchOrchestrator:
         
         return None
     
+    def _execute_single_task(self, task, other_sections):
+        """Execute a single research task. Thread-safe — called from worker threads."""
+        print_task_start(task.topic, task.id)
+
+        content, new_tasks, glossary_terms = self.researcher.research_task(
+            task,
+            overall_query=self.query or "",
+            other_sections=other_sections,
+            session_id=self.session_id
+        )
+
+        # Save content to file
+        save_markdown(task.file_path, content, append=False)
+
+        # Update task statistics
+        word_count = count_words(content)
+        citation_count = count_citations(content)
+
+        self.db.mark_task_complete(
+            task.id,
+            word_count=word_count,
+            citation_count=citation_count
+        )
+
+        print_write(task.file_path, word_count)
+
+        return {
+            'task_id': task.id,
+            'new_tasks': new_tasks,
+            'glossary_terms': glossary_terms,
+        }
+
     def _run_research_loop(self):
-        """Execute the main research loop"""
+        """Execute the main research loop with parallel task execution."""
         print_info("Starting research loop...")
 
         loop_count = 0
@@ -166,107 +199,100 @@ class ResearchOrchestrator:
         max_consecutive_failures = 3
         max_loops = float('inf') if self.config.research.max_loops < 0 else self.config.research.max_loops
         max_runtime = timedelta(hours=self.config.research.max_runtime_hours) if self.config.research.max_runtime_hours else None
-        
+        max_workers = self.config.research.max_concurrent_tasks
+
         with create_progress_bar() as progress:
-            # Create progress task
             total_tasks = self.db.get_task_count(session_id=self.session_id)
-            task_id = progress.add_task(
+            progress_id = progress.add_task(
                 "[cyan]Researching...",
                 total=total_tasks
             )
 
-            while self.is_running:
-                # Check termination conditions
-                if loop_count >= max_loops:
-                    print_info(f"Reached maximum loop count ({max_loops})")
-                    break
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                active = {}  # future -> task
 
-                if max_runtime and (datetime.now() - self.start_time) > max_runtime:
-                    print_info(f"Reached maximum runtime ({self.config.research.max_runtime_hours}h)")
-                    break
-
-                # Get next task
-                task = self.db.get_next_task(session_id=self.session_id)
-
-                if not task:
-                    failed = self.db.get_task_count(TaskStatus.FAILED, session_id=self.session_id)
-                    if failed > 0:
-                        print_warning(f"No pending tasks remain; {failed} task(s) failed.")
-                    else:
-                        print_success("All tasks completed!")
-                    break
-
-                # Update progress
-                completed = self.db.get_task_count(TaskStatus.COMPLETED, session_id=self.session_id)
-                total = self.db.get_task_count(session_id=self.session_id)
-                progress.update(task_id, completed=completed, total=total)
-                
-                # Execute research
-                print_task_start(task.topic, task.id)
-
-                # Build context: list of all other section topics for the researcher
-                all_tasks = self.db.get_all_tasks(session_id=self.session_id)
-                other_sections = [
-                    f"{t.topic} ({'done' if t.status == 'completed' else 'pending'})"
-                    for t in all_tasks if t.id != task.id
-                ]
-
-                try:
-                    content, new_tasks, glossary_terms = self.researcher.research_task(
-                        task,
-                        overall_query=self.query or "",
-                        other_sections=other_sections,
-                        session_id=self.session_id
-                    )
-                    
-                    # Save content to file
-                    save_markdown(task.file_path, content, append=False)
-                    
-                    # Update task statistics
-                    word_count = count_words(content)
-                    citation_count = count_citations(content)
-                    
-                    self.db.mark_task_complete(
-                        task.id,
-                        word_count=word_count,
-                        citation_count=citation_count
-                    )
-                    
-                    print_write(task.file_path, word_count)
-
-                    # Handle new tasks from recursion
-                    if new_tasks:
-                        self._add_recursive_tasks(new_tasks)
-
-                    # Handle glossary terms
-                    if glossary_terms:
-                        self._add_glossary_terms(glossary_terms, task.id)
-
-                    loop_count += 1
-                    consecutive_failures = 0  # reset on success
-
-                    # Discovery step: run after every N completed tasks
-                    if (
-                        self.config.discovery.enabled
-                        and loop_count % self.config.discovery.frequency == 0
-                    ):
-                        self._run_discovery()
-
-                    # Delay between tasks
-                    time.sleep(self.config.research.task_delay)
-
-                except Exception as e:
-                    logger.error(f"Task {task.id} failed: {e}")
-                    self.db.mark_task_failed(task.id, str(e))
-                    consecutive_failures += 1
-                    if consecutive_failures >= max_consecutive_failures:
-                        print_error(
-                            f"Aborting: {consecutive_failures} consecutive "
-                            f"task failures. Last error: {e}"
-                        )
+                while self.is_running:
+                    # Check termination conditions
+                    if loop_count >= max_loops:
+                        print_info(f"Reached maximum loop count ({max_loops})")
                         break
-                    continue
-        
+
+                    if max_runtime and (datetime.now() - self.start_time) > max_runtime:
+                        print_info(f"Reached maximum runtime ({self.config.research.max_runtime_hours}h)")
+                        break
+
+                    # Fill available executor slots with new tasks
+                    slots = max_workers - len(active)
+                    if slots > 0:
+                        new_tasks = self.db.get_next_tasks(slots, session_id=self.session_id)
+                        if new_tasks:
+                            all_tasks = self.db.get_all_tasks(session_id=self.session_id)
+                            for task in new_tasks:
+                                other_sections = [
+                                    f"{t.topic} ({'done' if t.status == 'completed' else 'pending'})"
+                                    for t in all_tasks if t.id != task.id
+                                ]
+                                future = executor.submit(
+                                    self._execute_single_task, task, other_sections
+                                )
+                                active[future] = task
+
+                    if not active:
+                        # No running tasks and none to claim — we're done
+                        failed = self.db.get_task_count(TaskStatus.FAILED, session_id=self.session_id)
+                        if failed > 0:
+                            print_warning(f"No pending tasks remain; {failed} task(s) failed.")
+                        else:
+                            print_success("All tasks completed!")
+                        break
+
+                    # Wait for at least one task to finish (timeout lets us re-check is_running)
+                    done, _ = wait(active.keys(), return_when=FIRST_COMPLETED, timeout=2.0)
+
+                    if not done:
+                        continue
+
+                    for future in done:
+                        task = active.pop(future)
+                        try:
+                            result = future.result()
+
+                            if result['new_tasks']:
+                                self._add_recursive_tasks(result['new_tasks'])
+                            if result['glossary_terms']:
+                                self._add_glossary_terms(result['glossary_terms'], result['task_id'])
+
+                            loop_count += 1
+                            consecutive_failures = 0
+
+                            # Discovery step: run after every N completed tasks
+                            if (
+                                self.config.discovery.enabled
+                                and loop_count % self.config.discovery.frequency == 0
+                            ):
+                                self._run_discovery()
+
+                        except Exception as e:
+                            logger.error(f"Task {task.id} failed: {e}")
+                            self.db.mark_task_failed(task.id, str(e))
+                            consecutive_failures += 1
+                            if consecutive_failures >= max_consecutive_failures:
+                                print_error(
+                                    f"Aborting: {consecutive_failures} consecutive "
+                                    f"task failures. Last error: {e}"
+                                )
+                                # Cancel queued (not-yet-started) futures
+                                for f in list(active):
+                                    f.cancel()
+                                active.clear()
+                                self.is_running = False
+                                break
+
+                        # Update progress
+                        completed = self.db.get_task_count(TaskStatus.COMPLETED, session_id=self.session_id)
+                        total = self.db.get_task_count(session_id=self.session_id)
+                        progress.update(progress_id, completed=completed, total=total)
+
         # Final progress update
         stats = self.db.get_statistics(session_id=self.session_id)
         print_statistics_table(stats)
@@ -394,6 +420,11 @@ class ResearchOrchestrator:
         print_info("Running editor rewrite pass...")
 
         # Step 1: Determine optimal section order
+        self.db.add_search_event(
+            session_id=self.session_id, task_id=None,
+            event_type="agent_action", query_group="reorder",
+            query_text="Determining optimal section order",
+        )
         topics = [ch["task"].topic for ch in chapters]
         ordered_topics = self.editor.determine_section_order(
             self.query or "", topics
@@ -421,6 +452,11 @@ class ResearchOrchestrator:
         for i, chapter in enumerate(ordered_chapters):
             following_topics = toc[i + 1:]
 
+            self.db.add_search_event(
+                session_id=self.session_id, task_id=chapter["task"].id,
+                event_type="agent_action", query_group="rewrite",
+                query_text=f"Rewriting section: {chapter['task'].topic}",
+            )
             rewritten_content = self.editor.rewrite_section(
                 query=self.query or "",
                 section_topic=chapter["task"].topic,
@@ -490,28 +526,45 @@ class ResearchOrchestrator:
                 pre_read_chapters
             )
 
-        # Generate executive summary
+        # Generate executive summary and conclusion in parallel
         executive_summary = None
-        if self.config.output.include_summary:
-            try:
-                executive_summary = self.editor.generate_executive_summary(
-                    self.query,
-                    section_summaries
-                )
-            except Exception as e:
-                logger.warning(f"Failed to generate executive summary: {e}")
-
-        # Generate conclusion
         conclusion = None
         total_words = self.db.get_total_word_count(session_id=self.session_id)
-        try:
-            conclusion = self.editor.generate_conclusion(
-                self.query,
-                section_summaries,
-                total_words
+
+        with ThreadPoolExecutor(max_workers=2) as comp_executor:
+            futures = {}
+
+            if self.config.output.include_summary:
+                self.db.add_search_event(
+                    session_id=self.session_id, task_id=None,
+                    event_type="agent_action", query_group="exec_summary",
+                    query_text="Generating executive summary",
+                )
+                futures[comp_executor.submit(
+                    self.editor.generate_executive_summary,
+                    self.query, section_summaries
+                )] = 'summary'
+
+            self.db.add_search_event(
+                session_id=self.session_id, task_id=None,
+                event_type="agent_action", query_group="conclusion",
+                query_text="Generating conclusion",
             )
-        except Exception as e:
-            logger.warning(f"Failed to generate conclusion: {e}")
+            futures[comp_executor.submit(
+                self.editor.generate_conclusion,
+                self.query, section_summaries, total_words
+            )] = 'conclusion'
+
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    result = future.result()
+                    if label == 'summary':
+                        executive_summary = result
+                    else:
+                        conclusion = result
+                except Exception as e:
+                    logger.warning(f"Failed to generate {label}: {e}")
         
         # Calculate duration
         duration_seconds = (datetime.now() - self.start_time).total_seconds()

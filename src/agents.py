@@ -5,6 +5,7 @@ Contains the Planner, Researcher, and Editor agents
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Tuple
 
 from .config import get_config, ResearchTask, TaskStatus
@@ -391,41 +392,55 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
         # Fallback: use the raw query
         return [query]
 
+    def _run_single_pre_search(self, q: str, session_id: int = None) -> List[dict]:
+        """Execute a single pre-planning search query. Thread-safe."""
+        qg = uuid.uuid4().hex[:12]
+        print_search(f"[pre-plan] {q}")
+        self.db.add_search_event(
+            session_id=session_id, task_id=None,
+            event_type="query", query_group=qg, query_text=q,
+        )
+        hits = web_search(q, max_results=5)
+        for hit in hits:
+            url = hit.get("url", "")
+            if url:
+                self.db.add_search_event(
+                    session_id=session_id, task_id=None,
+                    event_type="result", query_group=qg,
+                    url=url,
+                    title=hit.get("title", ""),
+                    snippet=hit.get("snippet", ""),
+                )
+        return hits
+
     def _pre_search(self, query: str, session_id: int = None) -> str:
         """Run preliminary web searches to give the planner real-world context.
 
-        Uses the LLM to generate diverse search queries, then executes them.
-        Returns formatted context string with titles and snippets.
+        Uses the LLM to generate diverse search queries, then executes them
+        in parallel. Returns formatted context string with titles and snippets.
         """
         logger.info("Running pre-planning web searches...")
 
         queries = self._generate_planning_queries(query, num_queries=2)
 
+        # Run all pre-planning searches in parallel
         seen_urls = set()
         results = []
 
-        for q in queries:
-            qg = uuid.uuid4().hex[:12]
-            print_search(f"[pre-plan] {q}")
-            # Log query event
-            self.db.add_search_event(
-                session_id=session_id, task_id=None,
-                event_type="query", query_group=qg, query_text=q,
-            )
-            hits = web_search(q, max_results=5)
-            for hit in hits:
-                url = hit.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    results.append(hit)
-                    # Log result event
-                    self.db.add_search_event(
-                        session_id=session_id, task_id=None,
-                        event_type="result", query_group=qg,
-                        url=url,
-                        title=hit.get("title", ""),
-                        snippet=hit.get("snippet", ""),
-                    )
+        with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+            futures = [
+                executor.submit(self._run_single_pre_search, q, session_id)
+                for q in queries
+            ]
+            for future in as_completed(futures):
+                try:
+                    for hit in future.result():
+                        url = hit.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            results.append(hit)
+                except Exception as e:
+                    logger.warning(f"Pre-planning search failed: {e}")
 
         if not results:
             logger.warning("Pre-planning search returned no results")
@@ -792,41 +807,56 @@ class ResearcherAgent:
 
         return fallbacks
     
+    def _search_single_query(self, query: str, task_id: int, session_id: int = None) -> List[dict]:
+        """Execute a single search query and log events. Thread-safe."""
+        qg = uuid.uuid4().hex[:12]
+        print_search(query)
+        logger.info(f"Searching: {query}")
+        self.db.add_search_event(
+            session_id=session_id, task_id=task_id,
+            event_type="query", query_group=qg, query_text=query,
+        )
+        results = web_search(query)
+        logger.info(f"Search returned {len(results)} results")
+
+        for r in results:
+            url = r.get('url', '')
+            if url:
+                self.db.add_search_event(
+                    session_id=session_id, task_id=task_id,
+                    event_type="result", query_group=qg,
+                    url=url,
+                    title=r.get('title', ''),
+                    snippet=r.get('snippet', ''),
+                )
+        return results
+
     def _execute_searches(self, queries: List[str], task_id: int, session_id: int = None) -> str:
-        """Execute searches and aggregate results"""
+        """Execute searches in parallel and aggregate results"""
         logger.info(f"Executing searches with {len(queries)} queries")
+
+        # Phase 1: Run all search queries in parallel
         all_results = []
         seen_urls = set()
 
-        for query in queries:
-            qg = uuid.uuid4().hex[:12]
-            print_search(query)
-            logger.info(f"Searching: {query}")
-            # Log query event
-            self.db.add_search_event(
-                session_id=session_id, task_id=task_id,
-                event_type="query", query_group=qg, query_text=query,
-            )
-            results = web_search(query)
-            logger.info(f"Search returned {len(results)} results")
-
-            for r in results:
-                url = r.get('url', '')
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_results.append(r)
-                    # Log result event
-                    self.db.add_search_event(
-                        session_id=session_id, task_id=task_id,
-                        event_type="result", query_group=qg,
-                        url=url,
-                        title=r.get('title', ''),
-                        snippet=r.get('snippet', ''),
-                    )
+        with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+            futures = [
+                executor.submit(self._search_single_query, q, task_id, session_id)
+                for q in queries
+            ]
+            for future in as_completed(futures):
+                try:
+                    for r in future.result():
+                        url = r.get('url', '')
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(r)
+                except Exception as e:
+                    logger.warning(f"Search query failed: {e}")
 
         logger.info(f"Total unique results: {len(all_results)}")
 
-        # Extract full content from top results
+        # Phase 2: Extract full content from top results
         context_parts = []
         sources_added = 0
         max_sources = self.config.search.max_results
@@ -989,6 +1019,10 @@ If you discover important sub-topics that need separate investigation, include t
             # Remove JSON block from content
             content = response[:json_start_pos].strip()
 
+        # Safety net: strip any remaining trailing JSON block that the
+        # structured extraction missed (malformed JSON, unexpected format, etc.)
+        content = self._strip_trailing_json(content)
+
         return content, new_tasks, glossary_terms
 
     def _extract_json_metadata(self, response: str) -> Tuple[dict, int]:
@@ -1003,10 +1037,10 @@ If you discover important sub-topics that need separate investigation, include t
         """
         _EXPECTED_KEYS = ('new_tasks', 'glossary_terms')
 
-        # Method 1 & 2: fenced code blocks (```json or plain ```)
+        # Method 1 & 2: fenced code blocks (```json/```JSON or plain ```)
         # Iterate all fenced blocks; keep the last valid one (closest to end).
         json_data, json_pos = None, -1
-        for fenced in re.finditer(r'```(?:json)?\s*\n?(.*?)\s*```', response, re.DOTALL):
+        for fenced in re.finditer(r'```(?:json)?\s*\n?(.*?)\s*```', response, re.DOTALL | re.IGNORECASE):
             candidate = fenced.group(1).strip()
             if not candidate.startswith('{'):
                 continue
@@ -1070,6 +1104,34 @@ If you discover important sub-topics that need separate investigation, include t
                 if depth == 0:
                     return i + 1
         return None
+
+    @staticmethod
+    def _strip_trailing_json(content: str) -> str:
+        """Remove trailing JSON blocks (fenced or naked) from section content.
+
+        Safety net for when _extract_json_metadata fails to parse the block
+        (malformed JSON, unexpected keys, uppercase ```JSON tag, etc.).
+        """
+        text = content.rstrip()
+
+        # 1. Trailing fenced code block containing a JSON object
+        m = re.search(r'\n```[a-zA-Z]*\s*\n[\s\S]*?\n```\s*$', text)
+        if m and '{' in m.group():
+            return text[:m.start()].rstrip()
+
+        # 2. Trailing naked JSON object — scan backwards for lines starting
+        #    with '{' and try to parse from there to end-of-string.
+        lines = text.split('\n')
+        for i in range(len(lines) - 1, max(len(lines) - 30, -1), -1):
+            if lines[i].strip().startswith('{'):
+                candidate = '\n'.join(lines[i:]).strip()
+                try:
+                    json.loads(candidate)
+                    return '\n'.join(lines[:i]).rstrip()
+                except json.JSONDecodeError:
+                    continue  # inner brace; keep scanning for outer {
+
+        return content
 
 
 # =============================================================================

@@ -1046,6 +1046,15 @@ details.report-section > summary.section-header h2 {
     transform: rotate(90deg);
 }
 
+/* Compilation phase actions (not expandable) */
+.st-action .st-query-header {
+    cursor: default;
+}
+.st-action .st-query-header::before {
+    content: "\2022";
+    font-size: 0.7rem;
+}
+
 .st-query-text {
     flex: 1;
     color: var(--text);

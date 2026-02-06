@@ -462,6 +462,40 @@ class DatabaseManager:
             result = query.first()
             return result.to_pydantic() if result else None
 
+    def get_in_progress_tasks(self, session_id: int = None) -> List[ResearchTask]:
+        """Get all currently in-progress tasks."""
+        with self.get_sync_session() as session:
+            query = session.query(TaskModel).filter(
+                TaskModel.status == TaskStatus.IN_PROGRESS.value
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            results = query.order_by(TaskModel.id).all()
+            return [r.to_pydantic() for r in results]
+
+    def get_next_tasks(self, count: int = 1, session_id: int = None) -> List[ResearchTask]:
+        """Atomically claim up to `count` pending tasks by marking them IN_PROGRESS.
+
+        Returns claimed tasks ordered by priority desc, depth asc, id asc.
+        """
+        with self.get_sync_session() as session:
+            query = session.query(TaskModel).filter(
+                TaskModel.status == 'pending'
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            tasks = query.order_by(
+                TaskModel.priority.desc(),
+                TaskModel.depth.asc(),
+                TaskModel.id.asc()
+            ).limit(count).all()
+
+            for task in tasks:
+                task.status = TaskStatus.IN_PROGRESS.value
+
+            session.commit()
+            return [t.to_pydantic() for t in tasks]
+
     def get_recent_completed_tasks(self, limit: int = 5, session_id: int = None) -> List[ResearchTask]:
         """Get the most recently completed tasks, ordered newest first."""
         with self.get_sync_session() as session:

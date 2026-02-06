@@ -100,6 +100,16 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
                     "result_count": 0,
                 },
             ),
+            (
+                "compilation",
+                {
+                    "phase_key": "compilation",
+                    "phase_label": "Compilation Phase",
+                    "queries": [],
+                    "query_count": 0,
+                    "result_count": 0,
+                },
+            ),
         ]
     )
 
@@ -109,6 +119,20 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
     domains = set()
 
     for ev in events:
+        # Agent actions (rewrite, summary, conclusion) go to compilation phase
+        if ev.event_type == "agent_action":
+            phase_group = phase_map["compilation"]
+            phase_group["query_count"] += 1
+            total_queries += 1
+            phase_group["queries"].append({
+                "query_group": ev.query_group,
+                "query_text": (ev.query_text or "").strip(),
+                "results": [],
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+            })
+            continue
+
         phase_key = "planning" if ev.task_id is None else "research"
         phase_group = phase_map[phase_key]
         query_key = f"{phase_key}:{ev.task_id or 0}:{ev.query_group}"
@@ -212,7 +236,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
 
     # Phase, current task, elapsed time
     phase = _app().get_current_phase()
-    current_task = db.get_in_progress_task(session_id=sid) if sid else None
+    current_tasks = db.get_in_progress_tasks(session_id=sid) if sid else []
     elapsed_seconds = 0
     if resolved and resolved.started_at:
         elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
@@ -228,7 +252,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
         "page": "dashboard",
         "token_stats": get_token_tracker().get_stats(),
         "phase": phase,
-        "current_task": current_task,
+        "current_tasks": current_tasks,
         "elapsed_seconds": elapsed_seconds,
         **activity_log,
     })
@@ -635,9 +659,9 @@ async def fragment_progress(request: Request, session: Optional[int] = None):
     completed = stats.get("completed_tasks", 0)
     progress_pct = int((completed / total) * 100) if total > 0 else 0
 
-    # Phase and current task
+    # Phase and current tasks
     phase = _app().get_current_phase()
-    current_task = db.get_in_progress_task(session_id=sid) if sid else None
+    current_tasks = db.get_in_progress_tasks(session_id=sid) if sid else []
 
     # Elapsed time (seconds since session started)
     elapsed_seconds = 0
@@ -651,7 +675,7 @@ async def fragment_progress(request: Request, session: Optional[int] = None):
         "completed": completed,
         "total": total,
         "phase": phase,
-        "current_task": current_task,
+        "current_tasks": current_tasks,
         "elapsed_seconds": elapsed_seconds,
     })
 
