@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Deep Research Agent{% endblock %}
+
+{% block content %}
+{% set sp = "&session=" ~ session_id|string if session_id else "" %}
+<h1 class="page-title">Dashboard</h1>
+
+<!-- Start / Stop research -->
+{% if running %}
+<form class="research-form" hx-post="/api/research/stop" hx-swap="none"
+      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 500)">
+    <input type="text" value="{{ session.query if session else '' }}" disabled>
+    <button class="btn btn-danger" type="submit">Stop Research</button>
+</form>
+{% else %}
+<form id="start-form"
+      hx-post="/api/research/start" hx-swap="none"
+      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 1000)">
+    <!-- Query row -->
+    <div class="research-form">
+        <input type="text" name="query"
+               placeholder="Enter your research query..." required>
+        <button class="btn btn-primary" type="submit">Start Research</button>
+    </div>
+
+    <!-- Preset selector -->
+    <input type="hidden" name="preset" id="preset-input" value="quick">
+    <div class="preset-selector">
+        <div class="preset-buttons">
+            <button type="button" class="preset-btn active" data-preset="quick"
+                    onclick="selectPreset('quick')">
+                <span class="preset-name">Quick</span>
+                <span class="preset-desc">3–5 tasks, fast overview</span>
+            </button>
+            <button type="button" class="preset-btn" data-preset="standard"
+                    onclick="selectPreset('standard')">
+                <span class="preset-name">Standard</span>
+                <span class="preset-desc">8–15 tasks, balanced</span>
+            </button>
+            <button type="button" class="preset-btn" data-preset="deep"
+                    onclick="selectPreset('deep')">
+                <span class="preset-name">Deep</span>
+                <span class="preset-desc">15–30 tasks, thorough</span>
+            </button>
+            <button type="button" class="preset-btn" data-preset="exhaustive"
+                    onclick="selectPreset('exhaustive')">
+                <span class="preset-name">Exhaustive</span>
+                <span class="preset-desc">30–50 tasks, maximum depth</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Advanced settings -->
+    <details class="advanced-section">
+        <summary class="advanced-toggle">Advanced Settings</summary>
+        <div class="advanced-grid">
+            <!-- Task Limits -->
+            <div class="advanced-group">
+                <h4>Task Limits</h4>
+                <div class="field">
+                    <label for="f-min-tasks">Min Initial Tasks</label>
+                    <input type="number" id="f-min-tasks" name="research.min_initial_tasks" min="1" max="100">
+                </div>
+                <div class="field">
+                    <label for="f-max-tasks">Max Total Tasks</label>
+                    <input type="number" id="f-max-tasks" name="research.max_total_tasks" min="1" max="200">
+                </div>
+                <div class="field">
+                    <label for="f-max-loops">Max Loops</label>
+                    <input type="number" id="f-max-loops" name="research.max_loops" min="-1" max="200">
+                    <span class="field-hint">-1 = unlimited</span>
+                </div>
+                <div class="field">
+                    <label for="f-max-runtime">Max Runtime (hours)</label>
+                    <input type="number" id="f-max-runtime" name="research.max_runtime_hours" min="1" max="168">
+                </div>
+            </div>
+
+            <!-- Content Quality -->
+            <div class="advanced-group">
+                <h4>Content Quality</h4>
+                <div class="field">
+                    <label for="f-min-words">Min Words / Section</label>
+                    <input type="number" id="f-min-words" name="research.min_words_per_section" min="50" max="10000">
+                </div>
+                <div class="field">
+                    <label for="f-max-words">Max Words / Section</label>
+                    <input type="number" id="f-max-words" name="research.max_words_per_section" min="100" max="10000">
+                </div>
+                <div class="field">
+                    <label for="f-min-citations">Min Citations / Section</label>
+                    <input type="number" id="f-min-citations" name="research.min_citations_per_section" min="0" max="20">
+                </div>
+            </div>
+
+            <!-- Search -->
+            <div class="advanced-group">
+                <h4>Search</h4>
+                <div class="field">
+                    <label for="f-queries-per-task">Queries per Task</label>
+                    <input type="number" id="f-queries-per-task" name="search.queries_per_task" min="1" max="10">
+                </div>
+                <div class="field">
+                    <label for="f-max-results">Max Results</label>
+                    <input type="number" id="f-max-results" name="search.max_results" min="1" max="20">
+                </div>
+            </div>
+
+            <!-- Recursion -->
+            <div class="advanced-group">
+                <h4>Recursion</h4>
+                <div class="field field-checkbox">
+                    <input type="hidden" name="research.enable_recursion" value="false">
+                    <label>
+                        <input type="checkbox" id="f-enable-recursion" name="research.enable_recursion" value="true">
+                        Enable Recursion
+                    </label>
+                </div>
+                <div class="field">
+                    <label for="f-max-recursion">Max Recursion Depth</label>
+                    <input type="number" id="f-max-recursion" name="research.max_recursion_depth" min="0" max="5">
+                </div>
+            </div>
+        </div>
+    </details>
+</form>
+{% endif %}
+
+<script>
+var PRESETS = {
+    quick: {
+        "research.min_initial_tasks": 3,
+        "research.max_total_tasks": 5,
+        "research.min_words_per_section": 100,
+        "research.max_words_per_section": 500,
+        "research.min_citations_per_section": 1,
+        "research.enable_recursion": false,
+        "research.max_recursion_depth": 0,
+        "research.max_runtime_hours": 1,
+        "research.max_loops": 5,
+        "search.queries_per_task": 1,
+        "search.max_results": 3
+    },
+    standard: {
+        "research.min_initial_tasks": 8,
+        "research.max_total_tasks": 15,
+        "research.min_words_per_section": 500,
+        "research.max_words_per_section": 2000,
+        "research.min_citations_per_section": 3,
+        "research.enable_recursion": true,
+        "research.max_recursion_depth": 1,
+        "research.max_runtime_hours": 6,
+        "research.max_loops": 15,
+        "search.queries_per_task": 2,
+        "search.max_results": 5
+    },
+    deep: {
+        "research.min_initial_tasks": 15,
+        "research.max_total_tasks": 30,
+        "research.min_words_per_section": 1000,
+        "research.max_words_per_section": 3000,
+        "research.min_citations_per_section": 5,
+        "research.enable_recursion": true,
+        "research.max_recursion_depth": 2,
+        "research.max_runtime_hours": 24,
+        "research.max_loops": 30,
+        "search.queries_per_task": 3,
+        "search.max_results": 8
+    },
+    exhaustive: {
+        "research.min_initial_tasks": 30,
+        "research.max_total_tasks": 50,
+        "research.min_words_per_section": 2000,
+        "research.max_words_per_section": 5000,
+        "research.min_citations_per_section": 8,
+        "research.enable_recursion": true,
+        "research.max_recursion_depth": 3,
+        "research.max_runtime_hours": 48,
+        "research.max_loops": 50,
+        "search.queries_per_task": 4,
+        "search.max_results": 10
+    }
+};
+
+function selectPreset(name) {
+    document.getElementById('preset-input').value = name;
+    // Update active button
+    document.querySelectorAll('.preset-btn').forEach(function(btn) {
+        btn.classList.toggle('active', btn.dataset.preset === name);
+    });
+    // Fill advanced fields
+    var values = PRESETS[name];
+    if (!values) return;
+    var form = document.getElementById('start-form');
+    for (var key in values) {
+        var el = form.querySelector('input[name="' + key + '"][type="checkbox"]');
+        if (el) {
+            el.checked = !!values[key];
+            continue;
+        }
+        el = form.querySelector('input[name="' + key + '"][type="number"]');
+        if (el) {
+            el.value = values[key];
+        }
+    }
+}
+
+// Initialize with quick preset on page load
+document.addEventListener('DOMContentLoaded', function() {
+    if (document.getElementById('start-form')) {
+        selectPreset('quick');
+    }
+});
+</script>
+
+<!-- Session info -->
+{% if session %}
+<div class="session-info">
+    <strong>Query:</strong> {{ session.query[:200] }}{% if session.query|length > 200 %}...{% endif %}<br>
+    <strong>Started:</strong> {{ session.started_at }}<br>
+    <strong>Status:</strong> {{ session.status }}
+</div>
+{% endif %}
+
+<!-- Progress bar (polled) -->
+<div id="progress-area"
+     hx-get="/fragments/progress?session={{ session_id or '' }}"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML">
+    {% include "fragments/progress.html" %}
+</div>
+
+<!-- Stats grid (polled) -->
+<div id="stats-area"
+     hx-get="/fragments/stats?session={{ session_id or '' }}"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML">
+    {% include "fragments/stats.html" %}
+</div>
+
+<!-- Recent activity feed (polled) -->
+{% if session %}
+<div class="activity-section">
+    <h3 class="activity-heading">Recent Activity</h3>
+    <div id="activity-area"
+         hx-get="/fragments/activity?session={{ session_id or '' }}"
+         hx-trigger="every 5s"
+         hx-swap="innerHTML">
+        {% include "fragments/activity.html" %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Client-side elapsed timer (ticks between HTMX polls) -->
+<script>
+(function() {
+    var timerInterval = null;
+    function startTimer() {
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = setInterval(function() {
+            var el = document.querySelector('.elapsed-timer');
+            if (!el) { clearInterval(timerInterval); timerInterval = null; return; }
+            var secs = parseInt(el.dataset.start, 10) || 0;
+            secs++;
+            el.dataset.start = secs;
+            var h = Math.floor(secs / 3600);
+            var m = Math.floor((secs % 3600) / 60);
+            var s = secs % 60;
+            el.textContent = h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        }, 1000);
+    }
+    // Start on load and after each HTMX swap (server resets data-start)
+    document.addEventListener('DOMContentLoaded', startTimer);
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        if (e.detail.target && e.detail.target.id === 'progress-area') {
+            startTimer();
+        }
+    });
+})();
+</script>
+{% endblock %}

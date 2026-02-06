@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Sources – Deep Research Agent{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Sources</h1>
+
+{% if sources %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Domain</th>
+            <th>Quality</th>
+            <th>Type</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sources %}
+        <tr>
+            <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.title[:80] }}{% if s.title|length > 80 %}...{% endif %}</a></td>
+            <td>{{ s.domain }}</td>
+            <td>
+                <span class="quality-bar">
+                    <span class="quality-bar-inner" style="width: {{ (s.quality_score * 100)|int }}%"></span>
+                </span>
+                {{ "%.1f"|format(s.quality_score) }}
+            </td>
+            <td>
+                {% if s.is_academic %}<span class="badge badge-academic">Academic</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+    <p>No sources collected yet.</p>
+    <p>Sources appear as the research agent discovers and evaluates them.</p>
+</div>
+{% endif %}
+{% endblock %}

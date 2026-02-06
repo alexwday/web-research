@@ -1,0 +1,52 @@
+{% set pct = progress_pct if progress_pct is defined else 0 %}
+{% set c = completed if completed is defined else 0 %}
+{% set t = total if total is defined else 0 %}
+{% set r = running if running is defined else false %}
+{% set p = phase if phase is defined else "idle" %}
+{% set el = elapsed_seconds if elapsed_seconds is defined else 0 %}
+
+<!-- Phase indicator + elapsed timer -->
+{% if r or p != "idle" %}
+<div class="progress-status-row">
+    <div class="phase-indicator">
+        <span class="phase-dot {% if r %}phase-dot-active{% endif %}"></span>
+        <span class="phase-label">
+            {% if p == "planning" %}Planning research strategy...
+            {% elif p == "researching" %}Researching tasks...
+            {% elif p == "compiling" %}Compiling final report...
+            {% elif p == "complete" %}Complete
+            {% else %}Running
+            {% endif %}
+        </span>
+    </div>
+    {% if el > 0 %}
+    <div class="elapsed-timer" data-start="{{ el }}">
+        {{ "%d:%02d:%02d"|format(el // 3600, (el % 3600) // 60, el % 60) }}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Current task -->
+{% if current_task is defined and current_task %}
+<div class="current-task-indicator">
+    <span class="current-task-label">Working on:</span>
+    <span class="current-task-topic">{{ current_task.topic }}</span>
+</div>
+{% endif %}
+
+<!-- Progress bar -->
+<div class="progress-wrap">
+    <div class="progress-bar-outer">
+        <div class="progress-bar-inner" style="width: {{ pct }}%"></div>
+    </div>
+    <div class="progress-label">
+        {% if r %}
+            {{ c }} / {{ t }} tasks completed ({{ pct }}%) — running
+        {% elif t > 0 %}
+            {{ c }} / {{ t }} tasks completed ({{ pct }}%)
+        {% else %}
+            No tasks yet
+        {% endif %}
+    </div>
+</div>

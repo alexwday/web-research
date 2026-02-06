@@ -1,19 +1,16 @@
 """
 Database Module for Deep Research Agent
-Handles all state persistence using SQLite with async support
+Handles all state persistence using SQLite
 """
-import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from contextlib import asynccontextmanager
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Float, Boolean,
-    DateTime, ForeignKey, Enum, Table, select, update, delete, func, text
+    DateTime, ForeignKey, Table, func, text
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, backref, sessionmaker
 
 from .config import (
     get_config, TaskStatus, ResearchTask, Source, GlossaryTerm, ResearchSession
@@ -31,7 +28,8 @@ task_source_association = Table(
     'task_source_association',
     Base.metadata,
     Column('task_id', Integer, ForeignKey('tasks.id'), primary_key=True),
-    Column('source_id', Integer, ForeignKey('sources.id'), primary_key=True)
+    Column('source_id', Integer, ForeignKey('sources.id'), primary_key=True),
+    Column('position', Integer, default=0),
 )
 
 
@@ -50,18 +48,19 @@ class TaskModel(Base):
     depth = Column(Integer, default=0)
     word_count = Column(Integer, default=0)
     citation_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     
     # Relationships
-    children = relationship("TaskModel", backref="parent", remote_side=[id])
+    children = relationship("TaskModel", backref=backref("parent", remote_side="TaskModel.id"), foreign_keys=[parent_id])
     sources = relationship("SourceModel", secondary=task_source_association, back_populates="tasks")
     
     def to_pydantic(self) -> ResearchTask:
         return ResearchTask(
             id=self.id,
             parent_id=self.parent_id,
+            session_id=self.session_id,
             topic=self.topic,
             description=self.description,
             file_path=self.file_path,
@@ -85,10 +84,11 @@ class SourceModel(Base):
     title = Column(String(500), nullable=False)
     domain = Column(String(200), nullable=False)
     snippet = Column(Text, nullable=True)
+    # Retained for debugging and potential future re-synthesis of sections
     full_content = Column(Text, nullable=True)
     quality_score = Column(Float, default=0.5)
     is_academic = Column(Boolean, default=False)
-    accessed_at = Column(DateTime, default=datetime.utcnow)
+    accessed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     tasks = relationship("TaskModel", secondary=task_source_association, back_populates="sources")
@@ -111,11 +111,12 @@ class SourceModel(Base):
 class GlossaryModel(Base):
     """SQLAlchemy model for glossary terms"""
     __tablename__ = 'glossary'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     term = Column(String(200), unique=True, nullable=False)
     definition = Column(Text, nullable=False)
     first_occurrence_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    session_id = Column(Integer, ForeignKey('sessions.id'), nullable=True)
     
     def to_pydantic(self) -> GlossaryTerm:
         return GlossaryTerm(
@@ -132,14 +133,18 @@ class SessionModel(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     query = Column(Text, nullable=False)
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     ended_at = Column(DateTime, nullable=True)
     total_tasks = Column(Integer, default=0)
     completed_tasks = Column(Integer, default=0)
     total_words = Column(Integer, default=0)
     total_sources = Column(Integer, default=0)
     status = Column(String(20), default='running')
-    
+    executive_summary = Column(Text, nullable=True)
+    conclusion = Column(Text, nullable=True)
+    report_markdown_path = Column(String(500), nullable=True)
+    report_html_path = Column(String(500), nullable=True)
+
     def to_pydantic(self) -> ResearchSession:
         return ResearchSession(
             id=self.id,
@@ -150,7 +155,11 @@ class SessionModel(Base):
             completed_tasks=self.completed_tasks,
             total_words=self.total_words,
             total_sources=self.total_sources,
-            status=self.status
+            status=self.status,
+            executive_summary=self.executive_summary,
+            conclusion=self.conclusion,
+            report_markdown_path=self.report_markdown_path,
+            report_html_path=self.report_html_path,
         )
 
 
@@ -183,29 +192,61 @@ class DatabaseManager:
         """Initialize database tables"""
         # Ensure directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Create all tables
         Base.metadata.create_all(self.engine)
-        
+
         # Enable WAL mode for better concurrency
         if self.wal_mode:
             with self.engine.connect() as conn:
                 conn.execute(text("PRAGMA journal_mode=WAL"))
                 conn.commit()
+
+        # Run migrations for existing databases
+        self._migrate_session_columns()
+        self._migrate_glossary_columns()
+        self._migrate_association_columns()
+
+    def _migrate_session_columns(self):
+        """Add missing columns to the sessions table for existing databases."""
+        new_columns = {
+            "executive_summary": "TEXT",
+            "conclusion": "TEXT",
+            "report_markdown_path": "VARCHAR(500)",
+            "report_html_path": "VARCHAR(500)",
+        }
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(sessions)")).fetchall()
+            existing = {row[1] for row in rows}
+            for col_name, col_type in new_columns.items():
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}"
+                    ))
+            conn.commit()
     
-    @asynccontextmanager
-    async def get_session(self):
-        """Get a database session"""
-        session = self.Session()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-    
+    def _migrate_glossary_columns(self):
+        """Add session_id column to glossary table for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(glossary)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "session_id" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE glossary ADD COLUMN session_id INTEGER REFERENCES sessions(id)"
+                ))
+                conn.commit()
+
+    def _migrate_association_columns(self):
+        """Add position column to task_source_association for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(task_source_association)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "position" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE task_source_association ADD COLUMN position INTEGER DEFAULT 0"
+                ))
+                conn.commit()
+
     def get_sync_session(self):
         """Get a synchronous session"""
         return self.Session()
@@ -253,7 +294,7 @@ class DatabaseManager:
         self.update_session(
             session_id,
             status='completed',
-            ended_at=datetime.utcnow()
+            ended_at=datetime.now(timezone.utc)
         )
     
     # =========================================================================
@@ -272,7 +313,7 @@ class DatabaseManager:
                 status=task.status.value if isinstance(task.status, TaskStatus) else task.status,
                 priority=task.priority,
                 depth=task.depth,
-                created_at=datetime.utcnow()
+                created_at=datetime.now(timezone.utc)
             )
             session.add(db_task)
             session.commit()
@@ -293,7 +334,7 @@ class DatabaseManager:
                     status=task.status.value if isinstance(task.status, TaskStatus) else task.status,
                     priority=task.priority,
                     depth=task.depth,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now(timezone.utc)
                 )
                 session.add(db_task)
                 db_tasks.append(db_task)
@@ -306,12 +347,15 @@ class DatabaseManager:
             
             return [t.to_pydantic() for t in db_tasks]
     
-    def get_next_task(self) -> Optional[ResearchTask]:
+    def get_next_task(self, session_id: int = None) -> Optional[ResearchTask]:
         """Get the next pending task (highest priority first)"""
         with self.get_sync_session() as session:
-            result = session.query(TaskModel).filter(
+            query = session.query(TaskModel).filter(
                 TaskModel.status == 'pending'
-            ).order_by(
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            result = query.order_by(
                 TaskModel.priority.desc(),
                 TaskModel.depth.asc(),
                 TaskModel.id.asc()
@@ -326,12 +370,14 @@ class DatabaseManager:
             ).first()
             return result.to_pydantic() if result else None
     
-    def get_all_tasks(self, status: TaskStatus = None) -> List[ResearchTask]:
-        """Get all tasks, optionally filtered by status"""
+    def get_all_tasks(self, status: TaskStatus = None, session_id: int = None) -> List[ResearchTask]:
+        """Get all tasks, optionally filtered by status and/or session"""
         with self.get_sync_session() as session:
             query = session.query(TaskModel)
             if status:
                 query = query.filter(TaskModel.status == status.value)
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
             results = query.order_by(TaskModel.id).all()
             return [r.to_pydantic() for r in results]
     
@@ -354,7 +400,7 @@ class DatabaseManager:
         self.update_task(
             task_id,
             status=TaskStatus.COMPLETED.value,
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc),
             word_count=word_count,
             citation_count=citation_count
         )
@@ -367,43 +413,81 @@ class DatabaseManager:
             error_message=error_message
         )
     
-    def get_task_count(self, status: TaskStatus = None) -> int:
+    def get_task_count(self, status: TaskStatus = None, session_id: int = None) -> int:
         """Get count of tasks"""
         with self.get_sync_session() as session:
             query = session.query(func.count(TaskModel.id))
             if status:
                 query = query.filter(TaskModel.status == status.value)
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
             return query.scalar() or 0
     
-    def get_total_word_count(self) -> int:
+    def get_total_word_count(self, session_id: int = None) -> int:
         """Get total word count across all completed tasks"""
         with self.get_sync_session() as session:
-            result = session.query(func.sum(TaskModel.word_count)).filter(
+            query = session.query(func.sum(TaskModel.word_count)).filter(
                 TaskModel.status == TaskStatus.COMPLETED.value
-            ).scalar()
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            result = query.scalar()
             return result or 0
     
+    def get_in_progress_task(self, session_id: int = None) -> Optional[ResearchTask]:
+        """Get the currently in-progress task (if any)."""
+        with self.get_sync_session() as session:
+            query = session.query(TaskModel).filter(
+                TaskModel.status == TaskStatus.IN_PROGRESS.value
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            result = query.first()
+            return result.to_pydantic() if result else None
+
+    def get_recent_completed_tasks(self, limit: int = 5, session_id: int = None) -> List[ResearchTask]:
+        """Get the most recently completed tasks, ordered newest first."""
+        with self.get_sync_session() as session:
+            query = session.query(TaskModel).filter(
+                TaskModel.status == TaskStatus.COMPLETED.value
+            )
+            if session_id is not None:
+                query = query.filter(TaskModel.session_id == session_id)
+            results = query.order_by(TaskModel.completed_at.desc()).limit(limit).all()
+            return [r.to_pydantic() for r in results]
+
     # =========================================================================
     # SOURCE OPERATIONS
     # =========================================================================
     
-    def add_source(self, source: Source, task_id: int = None) -> Source:
-        """Add a new source"""
+    def add_source(self, source: Source, task_id: int = None, position: int = 0) -> Source:
+        """Add a new source, linking it to a task with a presentation position."""
         with self.get_sync_session() as session:
             # Check if source already exists
             existing = session.query(SourceModel).filter(
                 SourceModel.url == source.url
             ).first()
-            
+
             if existing:
-                # Link to task if provided
+                # Link to task if provided (with position for citation ordering)
                 if task_id:
-                    task = session.query(TaskModel).get(task_id)
-                    if task and task not in existing.tasks:
-                        existing.tasks.append(task)
+                    assoc_exists = session.execute(
+                        task_source_association.select().where(
+                            task_source_association.c.task_id == task_id,
+                            task_source_association.c.source_id == existing.id,
+                        )
+                    ).first()
+                    if not assoc_exists:
+                        session.execute(
+                            task_source_association.insert().values(
+                                task_id=task_id,
+                                source_id=existing.id,
+                                position=position,
+                            )
+                        )
                         session.commit()
                 return existing.to_pydantic()
-            
+
             # Create new source
             db_source = SourceModel(
                 url=source.url,
@@ -413,16 +497,21 @@ class DatabaseManager:
                 full_content=source.full_content,
                 quality_score=source.quality_score,
                 is_academic=source.is_academic,
-                accessed_at=datetime.utcnow()
+                accessed_at=datetime.now(timezone.utc)
             )
-            
-            # Link to task if provided
-            if task_id:
-                task = session.query(TaskModel).get(task_id)
-                if task:
-                    db_source.tasks.append(task)
-            
             session.add(db_source)
+            session.flush()  # get the id before inserting association
+
+            # Link to task with position
+            if task_id:
+                session.execute(
+                    task_source_association.insert().values(
+                        task_id=task_id,
+                        source_id=db_source.id,
+                        position=position,
+                    )
+                )
+
             session.commit()
             session.refresh(db_source)
             return db_source.to_pydantic()
@@ -441,30 +530,41 @@ class DatabaseManager:
             ).first()
             return result.to_pydantic() if result else None
     
-    def get_source_count(self) -> int:
+    def get_source_count(self, session_id: int = None) -> int:
         """Get count of sources"""
         with self.get_sync_session() as session:
+            if session_id is not None:
+                return session.query(func.count(SourceModel.id.distinct())).join(
+                    task_source_association,
+                    SourceModel.id == task_source_association.c.source_id
+                ).join(
+                    TaskModel,
+                    TaskModel.id == task_source_association.c.task_id
+                ).filter(
+                    TaskModel.session_id == session_id
+                ).scalar() or 0
             return session.query(func.count(SourceModel.id)).scalar() or 0
     
     # =========================================================================
     # GLOSSARY OPERATIONS
     # =========================================================================
     
-    def add_glossary_term(self, term: GlossaryTerm) -> GlossaryTerm:
+    def add_glossary_term(self, term: GlossaryTerm, session_id: int = None) -> GlossaryTerm:
         """Add a glossary term"""
         with self.get_sync_session() as session:
             # Check if exists
             existing = session.query(GlossaryModel).filter(
                 GlossaryModel.term.ilike(term.term)
             ).first()
-            
+
             if existing:
                 return existing.to_pydantic()
-            
+
             db_term = GlossaryModel(
                 term=term.term,
                 definition=term.definition,
-                first_occurrence_task_id=term.first_occurrence_task_id
+                first_occurrence_task_id=term.first_occurrence_task_id,
+                session_id=session_id
             )
             session.add(db_term)
             session.commit()
@@ -476,33 +576,93 @@ class DatabaseManager:
         with self.get_sync_session() as session:
             results = session.query(GlossaryModel).order_by(GlossaryModel.term).all()
             return [r.to_pydantic() for r in results]
+
+    def get_glossary_terms_for_session(self, session_id: int) -> List[GlossaryTerm]:
+        """Get glossary terms scoped to a specific session"""
+        with self.get_sync_session() as session:
+            results = session.query(GlossaryModel).filter(
+                GlossaryModel.session_id == session_id
+            ).order_by(GlossaryModel.term).all()
+            return [r.to_pydantic() for r in results]
     
     # =========================================================================
     # STATISTICS
     # =========================================================================
     
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get research statistics"""
+    def get_statistics(self, session_id: int = None) -> Dict[str, Any]:
+        """Get research statistics, optionally scoped to a session"""
+        if session_id is not None:
+            glossary_count = len(self.get_glossary_terms_for_session(session_id))
+        else:
+            glossary_count = len(self.get_all_glossary_terms())
         return {
-            "total_tasks": self.get_task_count(),
-            "pending_tasks": self.get_task_count(TaskStatus.PENDING),
-            "completed_tasks": self.get_task_count(TaskStatus.COMPLETED),
-            "failed_tasks": self.get_task_count(TaskStatus.FAILED),
-            "total_sources": self.get_source_count(),
-            "total_words": self.get_total_word_count(),
-            "glossary_terms": len(self.get_all_glossary_terms())
+            "total_tasks": self.get_task_count(session_id=session_id),
+            "pending_tasks": self.get_task_count(TaskStatus.PENDING, session_id=session_id),
+            "completed_tasks": self.get_task_count(TaskStatus.COMPLETED, session_id=session_id),
+            "failed_tasks": self.get_task_count(TaskStatus.FAILED, session_id=session_id),
+            "total_sources": self.get_source_count(session_id=session_id),
+            "total_words": self.get_total_word_count(session_id=session_id),
+            "glossary_terms": glossary_count
         }
+
+    # =========================================================================
+    # SESSION LISTING & SOURCE SCOPING
+    # =========================================================================
+
+    def get_all_sessions(self) -> List[ResearchSession]:
+        """Get all sessions ordered by started_at DESC"""
+        with self.get_sync_session() as session:
+            results = session.query(SessionModel).order_by(
+                SessionModel.started_at.desc()
+            ).all()
+            return [r.to_pydantic() for r in results]
+
+    def get_most_recent_session(self) -> Optional[ResearchSession]:
+        """Get the most recent session regardless of status"""
+        with self.get_sync_session() as session:
+            result = session.query(SessionModel).order_by(
+                SessionModel.started_at.desc()
+            ).first()
+            return result.to_pydantic() if result else None
+
+    def get_sources_for_task(self, task_id: int) -> List[Source]:
+        """Get sources linked to a specific task, ordered by presentation position."""
+        with self.get_sync_session() as session:
+            results = session.query(SourceModel).join(
+                task_source_association,
+                SourceModel.id == task_source_association.c.source_id
+            ).filter(
+                task_source_association.c.task_id == task_id
+            ).order_by(task_source_association.c.position).all()
+            return [r.to_pydantic() for r in results]
+
+    def get_sources_for_session(self, session_id: int) -> List[Source]:
+        """Get sources linked to tasks in a specific session"""
+        with self.get_sync_session() as session:
+            results = session.query(SourceModel).join(
+                task_source_association,
+                SourceModel.id == task_source_association.c.source_id
+            ).join(
+                TaskModel,
+                TaskModel.id == task_source_association.c.task_id
+            ).filter(
+                TaskModel.session_id == session_id
+            ).distinct().order_by(SourceModel.id).all()
+            return [r.to_pydantic() for r in results]
 
 
 # Global database manager instance
 _db: Optional[DatabaseManager] = None
+_db_lock = __import__('threading').Lock()
 
 
 def get_database() -> DatabaseManager:
     """Get global database instance"""
     global _db
     if _db is None:
-        _db = DatabaseManager()
+        with _db_lock:
+            if _db is None:
+                _db = DatabaseManager()
     return _db
 
 

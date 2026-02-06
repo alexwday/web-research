@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Research Agent – Process Flow</title>
+<style>
+:root {
+    --bg: #fafafa;
+    --card: #ffffff;
+    --border: #ddd;
+    --primary: #111;
+    --accent: #0366d6;
+    --green: #22863a;
+    --blue: #0366d6;
+    --orange: #e36209;
+    --red: #cb2431;
+    --purple: #6f42c1;
+    --gray: #586069;
+    --light-green: #dcffe4;
+    --light-blue: #ddf4ff;
+    --light-orange: #fff5e6;
+    --light-purple: #f0e6ff;
+    --light-red: #ffeef0;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--primary);
+    line-height: 1.6;
+    padding: 2rem;
+}
+.container { max-width: 960px; margin: 0 auto; }
+h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+.subtitle { color: var(--gray); margin-bottom: 2rem; font-size: 1rem; }
+
+/* Flow connector */
+.connector {
+    display: flex;
+    justify-content: center;
+    padding: 0.75rem 0;
+}
+.connector .arrow {
+    width: 2px;
+    height: 32px;
+    background: var(--border);
+    position: relative;
+}
+.connector .arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid var(--border);
+}
+
+/* Phase header */
+.phase {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 2rem 0 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--primary);
+}
+.phase-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+.phase h2 { font-size: 1.3rem; }
+
+/* Step card */
+.step {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    border-left: 4px solid var(--accent);
+}
+.step.entry    { border-left-color: var(--green); }
+.step.llm      { border-left-color: var(--purple); }
+.step.search   { border-left-color: var(--orange); }
+.step.db       { border-left-color: var(--blue); }
+.step.file     { border-left-color: var(--green); }
+.step.decision { border-left-color: var(--red); background: #fffbf0; }
+.step.output   { border-left-color: var(--green); background: var(--light-green); }
+
+.step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.step-header h3 { font-size: 1rem; }
+.step-tag {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.tag-llm    { background: var(--light-purple); color: var(--purple); }
+.tag-api    { background: var(--light-orange); color: var(--orange); }
+.tag-db     { background: var(--light-blue); color: var(--blue); }
+.tag-file   { background: var(--light-green); color: var(--green); }
+.tag-logic  { background: #f0f0f0; color: var(--gray); }
+.tag-web    { background: var(--light-red); color: var(--red); }
+
+.step p { font-size: 0.9rem; color: #333; margin-bottom: 0.4rem; }
+.step .detail {
+    font-size: 0.82rem;
+    color: var(--gray);
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+}
+.step .detail code {
+    background: #f0f0f0;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+}
+
+/* Loop wrapper */
+.loop-box {
+    border: 2px dashed var(--orange);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin: 0.5rem 0;
+    background: rgba(227, 98, 9, 0.02);
+}
+.loop-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--orange);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 0.75rem;
+}
+
+/* Sub-loop */
+.sub-loop {
+    border: 1px dashed var(--blue);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 0;
+    background: rgba(3, 102, 214, 0.02);
+}
+.sub-loop-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--blue);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 0.5rem;
+}
+
+/* File map */
+.file-map {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+.file-map-item {
+    font-size: 0.8rem;
+    padding: 0.4rem 0.6rem;
+    background: #f6f8fa;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+.file-map-item code { font-weight: 600; color: var(--primary); }
+.file-map-item span { color: var(--gray); }
+
+/* Legend */
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 1.5rem 0;
+    padding: 1rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+}
+.legend-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+}
+
+/* Outputs grid */
+.outputs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+}
+.output-card {
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    text-align: center;
+    background: var(--light-green);
+}
+.output-card strong { font-size: 0.9rem; }
+.output-card p { font-size: 0.75rem; color: var(--gray); margin: 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Deep Research Agent &mdash; Process Flow</h1>
+<p class="subtitle">Complete pipeline from query input to final report output</p>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div> LLM Call</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--orange)"></div> External API</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--blue)"></div> Database</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--green)"></div> File I/O</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--gray)"></div> Logic / Decision</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--red)"></div> Web / UI</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- PHASE 0: USER INPUT -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">0</span><h2>User Input</h2></div>
+
+<div class="step entry">
+    <div class="step-header">
+        <h3>User submits query via Web Dashboard</h3>
+        <span class="step-tag tag-web">Web UI</span>
+    </div>
+    <p>User types a research query, selects a <strong>preset</strong> (Quick / Standard / Deep / Exhaustive), and optionally tweaks <strong>Advanced Settings</strong>.</p>
+    <div class="detail">
+        <strong>Form fields sent:</strong> <code>query</code>, <code>preset</code>, plus any <code>research.*</code> / <code>search.*</code> override fields<br>
+        <strong>Endpoint:</strong> <code>POST /api/research/start</code> &rarr; <code>routes.py:api_research_start()</code>
+    </div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step">
+    <div class="step-header">
+        <h3>Build config overrides</h3>
+        <span class="step-tag tag-logic">Logic</span>
+    </div>
+    <p>Route handler merges preset defaults with any individual field overrides into a single <code>overrides</code> dict. Preset values are applied first, then individual fields layer on top.</p>
+    <div class="detail">
+        <code>routes.py</code> &rarr; reads <code>RESEARCH_PRESETS[preset_name]["overrides"]</code> &rarr; layers form <code>research.*</code>/<code>search.*</code> fields on top &rarr; passes to <code>start_research_background(query, overrides)</code>
+    </div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step">
+    <div class="step-header">
+        <h3>Launch background worker thread</h3>
+        <span class="step-tag tag-logic">Logic</span>
+    </div>
+    <p>A daemon thread is spawned. The worker applies config overrides via <code>apply_overrides()</code> + <code>set_config()</code>, then creates the <code>ResearchOrchestrator</code>. Only one research thread runs at a time (enforced by <code>_research_lock</code>).</p>
+    <div class="detail">
+        <code>app.py:_worker()</code>: saves <code>original = get_config()</code>, applies overrides, runs orchestrator, then <code>finally: set_config(original)</code> to restore.
+    </div>
+</div>
+
+<!-- ================================================================ -->
+<!-- PHASE 1: INITIALIZATION -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">1</span><h2>Initialization</h2></div>
+
+<div class="step db">
+    <div class="step-header">
+        <h3>Create research session</h3>
+        <span class="step-tag tag-db">Database</span>
+    </div>
+    <p>A new <code>SessionModel</code> row is created in SQLite with the query text and <code>status='running'</code>.</p>
+    <div class="detail">
+        <code>orchestrator.py:_initialize_session()</code> &rarr; <code>db.create_session(query)</code> &rarr; returns <code>ResearchSession</code> with assigned <code>session_id</code>
+    </div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step file">
+    <div class="step-header">
+        <h3>Create output directory</h3>
+        <span class="step-tag tag-file">File I/O</span>
+    </div>
+    <p>Ensures the <code>report/</code> directory exists for section markdown files.</p>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step search">
+    <div class="step-header">
+        <h3>Pre-planning web search</h3>
+        <span class="step-tag tag-api">External API</span>
+    </div>
+    <p>Before the planner LLM runs, 2 broad Tavily searches are executed on the query to gather real-world context. This grounds the plan in actual web content &mdash; essential for niche, recent, or unfamiliar topics where the LLM's training data may be sparse.</p>
+    <div class="detail">
+        <strong>Queries:</strong> (1) the raw query, (2) <code>"{query} key topics overview"</code><br>
+        <strong>Returns:</strong> Up to 10 deduplicated results (title + snippet + URL) formatted as numbered context for the planner prompt.<br>
+        <strong>Graceful degradation:</strong> If searches return nothing, the planner still runs from LLM knowledge alone.
+    </div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step llm">
+    <div class="step-header">
+        <h3>PlannerAgent &rarr; Generate research plan</h3>
+        <span class="step-tag tag-llm">LLM Call</span>
+    </div>
+    <p>The Planner LLM receives the query, the <strong>pre-search results</strong>, and the config-driven task count range (<code>min_initial_tasks</code> to <code>max_total_tasks</code>). It returns a JSON plan with topics, descriptions, and priorities, informed by what actually exists on the web.</p>
+    <div class="detail">
+        <strong>Model:</strong> <code>config.llm.models.planner</code><br>
+        <strong>Prompt:</strong> System prompt explains priority rules (9-10 = intro/foundation, 7-8 = body, 5-6 = examples, 3-4 = edge cases, 1-2 = conclusion) and instructs the planner to ground its plan in the provided search results. Output is a JSON <code>{"tasks": [...]}</code> array.<br>
+        <strong>Post-processing:</strong> Priority enforcement &mdash; topics containing "conclusion"/"summary" forced to priority 1, "future"/"outlook" to 2, "introduction"/"overview" bumped to 9+. Hard cap at <code>max_total_tasks</code>.
+    </div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step db">
+    <div class="step-header">
+        <h3>Bulk insert tasks into database</h3>
+        <span class="step-tag tag-db">Database</span>
+    </div>
+    <p>Each task becomes a <code>TaskModel</code> row with <code>status='pending'</code>, a generated file path (<code>report/01_Topic_Name.md</code>), and is linked to the session via <code>session_id</code>.</p>
+    <div class="detail">
+        <code>db.add_tasks_bulk(tasks, session_id)</code> &rarr; also calls <code>db.update_session(session_id, total_tasks=N)</code>
+    </div>
+</div>
+
+<!-- ================================================================ -->
+<!-- PHASE 2: RESEARCH LOOP -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">2</span><h2>Research Loop</h2></div>
+
+<div class="loop-box">
+    <div class="loop-label">Main Loop &mdash; repeats until: all tasks done, max_loops reached, or max_runtime exceeded</div>
+
+    <div class="step">
+        <div class="step-header">
+            <h3>Check termination conditions</h3>
+            <span class="step-tag tag-logic">Logic</span>
+        </div>
+        <p>Before each iteration, checks: (1) <code>loop_count &ge; max_loops</code>, (2) runtime exceeds <code>max_runtime_hours</code>, (3) <code>is_running</code> flag (set to false on stop signal).</p>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step db">
+        <div class="step-header">
+            <h3>Fetch next pending task</h3>
+            <span class="step-tag tag-db">Database</span>
+        </div>
+        <p>Gets the highest-priority pending task: <code>ORDER BY priority DESC, depth ASC, id ASC</code>. If none remain, the loop exits.</p>
+        <div class="detail"><code>db.get_next_task(session_id)</code></div>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step db">
+        <div class="step-header">
+            <h3>Mark task as in_progress</h3>
+            <span class="step-tag tag-db">Database</span>
+        </div>
+        <p>Task status updated to <code>in_progress</code> so the dashboard shows it actively being researched.</p>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <!-- Sub-loop: Search -->
+    <div class="sub-loop">
+        <div class="sub-loop-label">Step A &mdash; Generate search queries (LLM call)</div>
+        <div class="step llm">
+            <div class="step-header">
+                <h3>Query Generator LLM</h3>
+                <span class="step-tag tag-llm">LLM Call</span>
+            </div>
+            <p>Generates <code>queries_per_task</code> diverse search queries for the current topic. Each query targets a different angle (broad overview, specific/technical, recent data).</p>
+            <div class="detail">
+                <strong>Model:</strong> <code>config.llm.models.researcher</code><br>
+                <strong>Output:</strong> Plain text, one query per line. Cleaned of bullets/numbering.
+            </div>
+        </div>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="sub-loop">
+        <div class="sub-loop-label">Step B &mdash; Execute searches &amp; gather content (repeats per query)</div>
+
+        <div class="step search">
+            <div class="step-header">
+                <h3>Tavily Search API</h3>
+                <span class="step-tag tag-api">External API</span>
+            </div>
+            <p>Each query is sent to Tavily with <code>search_depth="advanced"</code> and <code>include_raw_content=True</code> (gets full page text alongside snippets). Rate-limited to <code>search_calls_per_minute</code>.</p>
+            <div class="detail">
+                Returns: <code>url</code>, <code>title</code>, <code>snippet</code>, <code>raw_content</code>, <code>score</code> per result. Deduped by URL across queries.
+            </div>
+        </div>
+
+        <div class="connector"><div class="arrow"></div></div>
+
+        <div class="step">
+            <div class="step-header">
+                <h3>Extract &amp; score sources</h3>
+                <span class="step-tag tag-logic">Logic</span>
+            </div>
+            <p>For each result (up to <code>max_results</code>): uses Tavily <code>raw_content</code> if available, otherwise falls back to scraping via <code>trafilatura</code> &rarr; BeautifulSoup. Calculates quality score (0&ndash;1) based on domain type, content length, academic status.</p>
+            <div class="detail">
+                <strong>Quality scoring:</strong> Base 0.5, +0.3 academic, +0.2 high-quality domain (Wikipedia, NYT, etc.), +0.1 long content, &minus;0.1 short content.<br>
+                <strong>Filtered out if:</strong> <code>quality_score &lt; config.quality.min_source_quality</code> (default 0.5)
+            </div>
+        </div>
+
+        <div class="connector"><div class="arrow"></div></div>
+
+        <div class="step db">
+            <div class="step-header">
+                <h3>Save sources to database</h3>
+                <span class="step-tag tag-db">Database</span>
+            </div>
+            <p>Each source is saved as a <code>SourceModel</code> row and linked to the current task via the <code>task_source_association</code> table. Duplicates (same URL) are linked but not duplicated.</p>
+        </div>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="sub-loop">
+        <div class="sub-loop-label">Step C &mdash; Synthesize &amp; write section (LLM call)</div>
+        <div class="step llm">
+            <div class="step-header">
+                <h3>ResearcherAgent &rarr; Write section</h3>
+                <span class="step-tag tag-llm">LLM Call</span>
+            </div>
+            <p>The writer LLM receives: the task topic/description, all gathered source material (truncated to ~50K tokens), the overall query for context, and a list of other section topics (to avoid repetition).</p>
+            <div class="detail">
+                <strong>Model:</strong> <code>config.llm.models.writer</code><br>
+                <strong>System prompt enforces:</strong> word count range (<code>min_words_per_section</code> to <code>max_words_per_section</code>), minimum citations (<code>min_citations_per_section</code>), subheading structure, numbered citation format [1], [2].<br>
+                <strong>Output:</strong> Markdown section content. May optionally include a trailing JSON block with <code>new_tasks</code> and <code>glossary_terms</code>.
+            </div>
+        </div>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step file">
+        <div class="step-header">
+            <h3>Save section to markdown file</h3>
+            <span class="step-tag tag-file">File I/O</span>
+        </div>
+        <p>The generated section content is written to the task's file path (e.g. <code>report/03_Topic_Name.md</code>).</p>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step db">
+        <div class="step-header">
+            <h3>Mark task complete + update stats</h3>
+            <span class="step-tag tag-db">Database</span>
+        </div>
+        <p>Task marked <code>status='completed'</code> with <code>word_count</code> and <code>citation_count</code> calculated from the saved content.</p>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step decision">
+        <div class="step-header">
+            <h3>Handle recursive tasks &amp; glossary</h3>
+            <span class="step-tag tag-logic">Decision</span>
+        </div>
+        <p>If the writer suggested new sub-topics (via JSON block) <strong>and</strong> recursion is enabled <strong>and</strong> <code>task.depth &lt; max_recursion_depth</code> <strong>and</strong> total tasks haven't hit <code>max_total_tasks</code>: up to 1 new task is added (priority capped at 4, depth incremented). Glossary terms are saved to <code>GlossaryModel</code>.</p>
+        <div class="detail">
+            Duplicate detection: new task is rejected if its topic is a substring of (or contains) any existing task topic. This prevents task explosion.
+        </div>
+    </div>
+
+    <div class="connector"><div class="arrow"></div></div>
+
+    <div class="step">
+        <div class="step-header">
+            <h3>Delay, then loop</h3>
+            <span class="step-tag tag-logic">Logic</span>
+        </div>
+        <p>Waits <code>task_delay</code> seconds (default 2s), then returns to the top of the loop to fetch the next task.</p>
+    </div>
+</div>
+
+<!-- ================================================================ -->
+<!-- PHASE 3: COMPILATION -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">3</span><h2>Report Compilation</h2></div>
+
+<div class="step file">
+    <div class="step-header">
+        <h3>Read all completed section files</h3>
+        <span class="step-tag tag-file">File I/O</span>
+    </div>
+    <p>Reads the first ~500 words of each completed section to build summaries for the editor. Also pre-reads full content for later compilation.</p>
+    <div class="detail"><code>orchestrator.py:_build_section_summaries()</code> &rarr; returns <code>(summaries, chapters)</code></div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step llm">
+    <div class="step-header">
+        <h3>EditorAgent &rarr; Generate executive summary</h3>
+        <span class="step-tag tag-llm">LLM Call</span>
+    </div>
+    <p>The editor LLM synthesizes all section summaries into a 300&ndash;500 word executive summary. Instructed to lead with the most important finding, reference specific data, and avoid generic filler.</p>
+    <div class="detail"><strong>Model:</strong> <code>config.llm.models.editor</code></div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step llm">
+    <div class="step-header">
+        <h3>EditorAgent &rarr; Generate conclusion</h3>
+        <span class="step-tag tag-llm">LLM Call</span>
+    </div>
+    <p>400&ndash;600 word conclusion that synthesizes <em>across</em> sections, identifies 2&ndash;3 overarching themes, discusses implications, and proposes specific future research directions.</p>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step">
+    <div class="step-header">
+        <h3>Build global bibliography &amp; remap citations</h3>
+        <span class="step-tag tag-logic">Logic</span>
+    </div>
+    <p>Sources from all tasks are deduplicated by URL into a single global numbered list. Citation numbers <code>[N]</code> in each section are remapped from local (per-task) to global numbering so they match the unified bibliography.</p>
+    <div class="detail"><code>compiler.py:_build_global_sources()</code> &mdash; uses regex to rewrite <code>[1]</code>, <code>[2]</code> etc. in each chapter's content.</div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step file">
+    <div class="step-header">
+        <h3>Compile Markdown report</h3>
+        <span class="step-tag tag-file">File I/O</span>
+    </div>
+    <p>Assembles the full report: title + metadata &rarr; table of contents &rarr; executive summary &rarr; all sections (sorted by file path) &rarr; conclusion &rarr; glossary &rarr; bibliography.</p>
+    <div class="detail"><strong>Output:</strong> <code>report/session_N/DEEP_RESEARCH_REPORT.md</code></div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step file">
+    <div class="step-header">
+        <h3>Compile HTML report</h3>
+        <span class="step-tag tag-file">File I/O</span>
+    </div>
+    <p>Converts each section from Markdown to HTML, wraps in a styled HTML template (Jinja2) with navigation TOC, glossary definitions, and clickable bibliography.</p>
+    <div class="detail"><strong>Output:</strong> <code>report/session_N/DEEP_RESEARCH_REPORT.html</code></div>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step db">
+    <div class="step-header">
+        <h3>Store report artifacts on session</h3>
+        <span class="step-tag tag-db">Database</span>
+    </div>
+    <p>The session row is updated with: <code>executive_summary</code>, <code>conclusion</code>, <code>report_markdown_path</code>, <code>report_html_path</code>.</p>
+</div>
+
+<!-- ================================================================ -->
+<!-- PHASE 4: FINALIZATION -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">4</span><h2>Finalization</h2></div>
+
+<div class="step db">
+    <div class="step-header">
+        <h3>Update session with final statistics</h3>
+        <span class="step-tag tag-db">Database</span>
+    </div>
+    <p>Session updated with <code>completed_tasks</code>, <code>total_words</code>, <code>total_sources</code>, then marked <code>status='completed'</code> with <code>ended_at</code> timestamp.</p>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step">
+    <div class="step-header">
+        <h3>Restore original config</h3>
+        <span class="step-tag tag-logic">Logic</span>
+    </div>
+    <p>The worker thread's <code>finally</code> block calls <code>set_config(original)</code> to restore the base configuration, so the next run starts from the YAML defaults.</p>
+</div>
+
+<div class="connector"><div class="arrow"></div></div>
+
+<div class="step output">
+    <div class="step-header">
+        <h3>Final Outputs</h3>
+    </div>
+    <div class="outputs-grid">
+        <div class="output-card">
+            <strong>Markdown Report</strong>
+            <p>report/session_N/<br>DEEP_RESEARCH_REPORT.md</p>
+        </div>
+        <div class="output-card">
+            <strong>HTML Report</strong>
+            <p>report/session_N/<br>DEEP_RESEARCH_REPORT.html</p>
+        </div>
+        <div class="output-card">
+            <strong>Section Files</strong>
+            <p>report/01_Topic.md<br>report/02_Topic.md ...</p>
+        </div>
+    </div>
+    <div class="outputs-grid" style="margin-top:0.5rem">
+        <div class="output-card">
+            <strong>SQLite Database</strong>
+            <p>research_state.db<br>Sessions, Tasks, Sources, Glossary</p>
+        </div>
+        <div class="output-card">
+            <strong>Web Dashboard</strong>
+            <p>Live at :8000<br>Progress, stats, report viewer</p>
+        </div>
+        <div class="output-card">
+            <strong>Log File</strong>
+            <p>logs/research.log<br>All operations logged</p>
+        </div>
+    </div>
+</div>
+
+<!-- ================================================================ -->
+<!-- FILE MAP -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">&bull;</span><h2>File &rarr; Responsibility Map</h2></div>
+
+<div class="step">
+    <div class="file-map">
+        <div class="file-map-item"><code>config.py</code> <span>&mdash; Pydantic models, YAML loader, presets, config singleton</span></div>
+        <div class="file-map-item"><code>database.py</code> <span>&mdash; SQLAlchemy ORM, all CRUD, statistics</span></div>
+        <div class="file-map-item"><code>orchestrator.py</code> <span>&mdash; Main loop, phase coordination, session lifecycle</span></div>
+        <div class="file-map-item"><code>agents.py</code> <span>&mdash; Planner, Researcher, Editor agents + prompts</span></div>
+        <div class="file-map-item"><code>compiler.py</code> <span>&mdash; MD/HTML/PDF report assembly, citation remapping</span></div>
+        <div class="file-map-item"><code>tools.py</code> <span>&mdash; Tavily search, scraping, file ops, quality scoring</span></div>
+        <div class="file-map-item"><code>llm_client.py</code> <span>&mdash; OpenAI API wrapper, token tracking, cost calc</span></div>
+        <div class="file-map-item"><code>logger.py</code> <span>&mdash; Rich console output, file logging</span></div>
+        <div class="file-map-item"><code>web/app.py</code> <span>&mdash; FastAPI factory, background thread mgmt</span></div>
+        <div class="file-map-item"><code>web/routes.py</code> <span>&mdash; HTML pages, JSON API, HTMX fragments</span></div>
+    </div>
+</div>
+
+<!-- ================================================================ -->
+<!-- LLM CALLS SUMMARY -->
+<!-- ================================================================ -->
+<div class="phase"><span class="phase-num">&bull;</span><h2>LLM Calls per Research Run</h2></div>
+
+<div class="step llm">
+    <p>For a run with <strong>N tasks</strong>, the total LLM + API calls are:</p>
+    <table style="width:100%; border-collapse:collapse; margin-top:0.75rem; font-size:0.85rem;">
+        <tr style="background:#f6f8fa">
+            <th style="padding:0.5rem; border:1px solid var(--border); text-align:left">Call</th>
+            <th style="padding:0.5rem; border:1px solid var(--border); text-align:left">Agent</th>
+            <th style="padding:0.5rem; border:1px solid var(--border); text-align:left">Type</th>
+            <th style="padding:0.5rem; border:1px solid var(--border); text-align:left">Count</th>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Pre-planning web search</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Planner</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Tavily API</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">2</td>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Create research plan</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Planner</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">1</td>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Generate search queries</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Researcher</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">N</td>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Write section content</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Writer</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">N</td>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Executive summary</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Editor</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">1</td>
+        </tr>
+        <tr>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Conclusion</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">Editor</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">1</td>
+        </tr>
+        <tr style="background:#f6f8fa; font-weight:600">
+            <td style="padding:0.5rem; border:1px solid var(--border)">Total</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)"></td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">LLM: 2N+3, Search: 2</td>
+            <td style="padding:0.5rem; border:1px solid var(--border)">2N + 5</td>
+        </tr>
+    </table>
+    <div class="detail">Example: Quick preset (5 tasks) = 15 total calls. Standard (15 tasks) = 35. Deep (30 tasks) = 65. The 2 pre-planning searches are a small fixed cost that dramatically improves plan quality.</div>
+</div>
+
+</div>
+</body>
+</html>

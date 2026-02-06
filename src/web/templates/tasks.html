@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Tasks – Deep Research Agent{% endblock %}
+
+{% block content %}
+{% set sp = "&session=" ~ session_id|string if session_id else "" %}
+{% set sq = "?session=" ~ session_id|string if session_id else "" %}
+<h1 class="page-title">Research Tasks</h1>
+
+<!-- Filter tabs -->
+<div class="filter-tabs">
+    <a href="/tasks{{ sq }}" class="{% if current_filter == 'all' %}active{% endif %}">All</a>
+    <a href="/tasks?status=pending{{ sp }}" class="{% if current_filter == 'pending' %}active{% endif %}">Pending</a>
+    <a href="/tasks?status=in_progress{{ sp }}" class="{% if current_filter == 'in_progress' %}active{% endif %}">In Progress</a>
+    <a href="/tasks?status=completed{{ sp }}" class="{% if current_filter == 'completed' %}active{% endif %}">Completed</a>
+    <a href="/tasks?status=failed{{ sp }}" class="{% if current_filter == 'failed' %}active{% endif %}">Failed</a>
+</div>
+
+<!-- Task table (body polled) -->
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Topic</th>
+            <th>Status</th>
+            <th>Priority</th>
+            <th>Words</th>
+            <th>Citations</th>
+        </tr>
+    </thead>
+    <tbody id="task-table-body"
+           hx-get="/fragments/task-list{% if current_filter != 'all' %}?status={{ current_filter }}{{ sp }}{% else %}{{ sq }}{% endif %}"
+           hx-trigger="every 5s"
+           hx-swap="innerHTML">
+        {% include "fragments/task_list.html" %}
+    </tbody>
+</table>
+
+{% if not tasks %}
+<div class="empty-state">
+    <p>No tasks found.</p>
+    <p>Start a research session from the <a href="/dashboard">Dashboard</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

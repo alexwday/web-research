@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Report Preview – Deep Research Agent{% endblock %}
+
+{% block content %}
+{% set sp = "&session=" ~ session_id|string if session_id else "" %}
+{% set sq = "?session=" ~ session_id|string if session_id else "" %}
+<h1 class="page-title">Report Preview</h1>
+
+{% if sections %}
+<!-- Summary bar -->
+<div class="report-summary-bar">
+    <span>{{ sections|length }} sections</span>
+    <span>{{ "{:,}".format(stats.get("total_words", 0)) }} words</span>
+    <span>{{ stats.get("total_sources", 0) }} sources</span>
+</div>
+
+<!-- Download bar -->
+{% if has_compiled_report or (session and session.report_markdown_path) %}
+<div class="download-bar">
+    <span>Download:</span>
+    {% if session and session.report_markdown_path %}
+    <a href="/report/download/markdown{{ sq }}" class="btn btn-sm btn-outline">Markdown</a>
+    {% endif %}
+    {% if session and session.report_html_path %}
+    <a href="/report/download/html{{ sq }}" class="btn btn-sm btn-outline">HTML</a>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- View toggle -->
+<div class="view-toggle">
+    <button class="btn btn-sm {% if view != 'paged' and view != 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
+            onclick="switchView('scroll')">Scroll View</button>
+    <button class="btn btn-sm {% if view == 'paged' %}btn-primary{% else %}btn-outline{% endif %}"
+            onclick="switchView('paged')">Page View</button>
+    {% if has_compiled_report %}
+    <button class="btn btn-sm {% if view == 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
+            onclick="switchView('compiled')">Final Report</button>
+    {% endif %}
+</div>
+
+{% if view == 'compiled' and has_compiled_report %}
+<!-- Compiled report view: iframe -->
+<div class="compiled-report-frame">
+    <iframe src="/report/compiled{{ sq }}" frameborder="0"></iframe>
+</div>
+
+{% elif view == 'paged' %}
+<!-- Paged view -->
+<div id="paged-content"
+     hx-get="/fragments/report-page?page={{ current_page }}{{ sp }}"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+</div>
+
+{% else %}
+<!-- Scroll view: exec summary + TOC + sections + conclusion + bibliography -->
+<div class="report-controls">
+    <button class="btn btn-sm btn-outline" id="toggle-all-btn" onclick="toggleAllSections()">Expand All</button>
+</div>
+
+{% if exec_summary_html %}
+<div class="report-card">
+    <h3>Executive Summary</h3>
+    <div class="report-card-body report-content">
+        {{ exec_summary_html | safe }}
+    </div>
+</div>
+{% endif %}
+
+<nav class="report-toc">
+    <h3>Table of Contents</h3>
+    <ol>
+        {% for section in sections %}
+        <li>
+            <a href="#section-{{ section.id }}">{{ section.topic }}</a>
+            <span class="toc-meta">{{ "{:,}".format(section.word_count) }} words</span>
+        </li>
+        {% endfor %}
+    </ol>
+</nav>
+
+<div class="report-content">
+    {% for section in sections %}
+    <details class="report-section" id="section-{{ section.id }}">
+        <summary class="section-header">
+            <h2>{{ loop.index }}. {{ section.topic }}</h2>
+            <span class="section-meta">
+                {{ "{:,}".format(section.word_count) }} words
+                {% if section.citation_count %} · {{ section.citation_count }} citations{% endif %}
+            </span>
+        </summary>
+        <div class="section-body">
+            {{ section.html | safe }}
+            <div class="section-back-to-top">
+                <a href="#top">Back to top</a>
+            </div>
+        </div>
+    </details>
+    {% endfor %}
+</div>
+
+{% if conclusion_html %}
+<div class="report-card">
+    <h3>Conclusion</h3>
+    <div class="report-card-body report-content">
+        {{ conclusion_html | safe }}
+    </div>
+</div>
+{% endif %}
+
+{% if sources %}
+<div class="report-card">
+    <h3>Bibliography</h3>
+    <ol class="bibliography-list">
+        {% for s in sources %}
+        <li>
+            <strong>{{ s.title }}</strong>
+            {% if s.is_academic %}<span class="badge badge-academic">Academic</span>{% endif %}<br>
+            <a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>
+        </li>
+        {% endfor %}
+    </ol>
+</div>
+{% endif %}
+
+{% endif %}
+
+<script>
+function toggleAllSections() {
+    const details = document.querySelectorAll('details.report-section');
+    const btn = document.getElementById('toggle-all-btn');
+    const anyOpen = Array.from(details).some(d => d.open);
+    details.forEach(d => d.open = !anyOpen);
+    btn.textContent = anyOpen ? 'Expand All' : 'Collapse All';
+}
+
+function switchView(view) {
+    const url = new URL(window.location);
+    url.searchParams.set('view', view);
+    if (view === 'paged') {
+        url.searchParams.set('page', '0');
+    } else {
+        url.searchParams.delete('page');
+    }
+    window.location = url;
+}
+</script>
+
+{% else %}
+<div class="empty-state">
+    <p>No completed sections yet.</p>
+    <p>The report preview will appear as tasks are completed.</p>
+</div>
+{% endif %}
+{% endblock %}

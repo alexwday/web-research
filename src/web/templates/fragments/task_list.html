@@ -1,0 +1,13 @@
+{% for task in tasks %}
+<tr>
+    <td>{{ task.id }}</td>
+    <td>{{ task.topic[:60] }}{% if task.topic|length > 60 %}...{% endif %}</td>
+    <td>
+        {% set status_val = task.status.value if task.status is not string else task.status %}
+        <span class="badge badge-{{ status_val }}">{{ status_val | replace("_", " ") }}</span>
+    </td>
+    <td>{{ task.priority }}</td>
+    <td>{{ "{:,}".format(task.word_count) if task.word_count else "-" }}</td>
+    <td>{{ task.citation_count if task.citation_count else "-" }}</td>
+</tr>
+{% endfor %}

@@ -1,14 +1,15 @@
 """
 Configuration and Pydantic Models for Deep Research Agent
 """
-import os
+import copy
+import threading
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -27,18 +28,6 @@ class TaskStatus(str, Enum):
     SKIPPED = "skipped"
 
 
-class LLMProvider(str, Enum):
-    ANTHROPIC = "anthropic"
-    OPENAI = "openai"
-    OPENROUTER = "openrouter"
-
-
-class SearchProvider(str, Enum):
-    TAVILY = "tavily"
-    SERPER = "serper"
-    BRAVE = "brave"
-
-
 # =============================================================================
 # DATABASE MODELS (Pydantic representations)
 # =============================================================================
@@ -47,6 +36,7 @@ class ResearchTask(BaseModel):
     """Represents a single research task/topic"""
     id: Optional[int] = None
     parent_id: Optional[int] = None
+    session_id: Optional[int] = None
     topic: str
     description: str
     file_path: str
@@ -102,6 +92,10 @@ class ResearchSession(BaseModel):
     total_words: int = 0
     total_sources: int = 0
     status: str = "running"
+    executive_summary: Optional[str] = None
+    conclusion: Optional[str] = None
+    report_markdown_path: Optional[str] = None
+    report_html_path: Optional[str] = None
 
 
 # =============================================================================
@@ -109,10 +103,10 @@ class ResearchSession(BaseModel):
 # =============================================================================
 
 class LLMModelsConfig(BaseModel):
-    planner: str = "claude-sonnet-4-20250514"
-    researcher: str = "claude-sonnet-4-20250514"
-    writer: str = "claude-sonnet-4-20250514"
-    editor: str = "claude-sonnet-4-20250514"
+    planner: str = "gpt-4o"
+    researcher: str = "gpt-4o-mini"
+    writer: str = "gpt-4o"
+    editor: str = "gpt-4o"
 
 
 class LLMMaxTokensConfig(BaseModel):
@@ -130,14 +124,12 @@ class LLMTemperatureConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: LLMProvider = LLMProvider.ANTHROPIC
     models: LLMModelsConfig = Field(default_factory=LLMModelsConfig)
     max_tokens: LLMMaxTokensConfig = Field(default_factory=LLMMaxTokensConfig)
     temperature: LLMTemperatureConfig = Field(default_factory=LLMTemperatureConfig)
 
 
 class SearchConfig(BaseModel):
-    provider: SearchProvider = SearchProvider.TAVILY
     depth: str = "advanced"
     max_results: int = 8
     queries_per_task: int = 3
@@ -149,8 +141,6 @@ class ScrapingConfig(BaseModel):
     max_content_length: int = 15000
     timeout: int = 15
     rotate_user_agents: bool = True
-    respect_robots: bool = True
-    max_retries: int = 3
 
 
 class ResearchConfig(BaseModel):
@@ -161,9 +151,9 @@ class ResearchConfig(BaseModel):
     max_words_per_section: int = 3000
     min_citations_per_section: int = 2
     enable_recursion: bool = True
-    session_delay: int = 2
+    task_delay: int = 2
     max_runtime_hours: int = 24
-    max_loops: int = 0
+    max_loops: int = -1  # -1 = infinite, 0 = do nothing
 
 
 class OutputConfig(BaseModel):
@@ -177,11 +167,7 @@ class OutputConfig(BaseModel):
 
 
 class QualityConfig(BaseModel):
-    validate_citations: bool = True
-    check_duplicates: bool = True
     min_source_quality: float = 0.5
-    prefer_academic: bool = False
-    fact_check: bool = False
 
 
 class RateLimitsConfig(BaseModel):
@@ -223,19 +209,9 @@ class Config(BaseModel):
 class Settings(BaseSettings):
     """Environment-based settings"""
     # API Keys
-    anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
-    openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
     tavily_api_key: Optional[str] = Field(default=None, alias="TAVILY_API_KEY")
-    serper_api_key: Optional[str] = Field(default=None, alias="SERPER_API_KEY")
-    brave_api_key: Optional[str] = Field(default=None, alias="BRAVE_API_KEY")
-    
-    # OpenRouter specific
-    openrouter_base_url: str = Field(
-        default="https://openrouter.ai/api/v1",
-        alias="OPENROUTER_BASE_URL"
-    )
-    
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -275,13 +251,17 @@ def get_settings() -> Settings:
 # Global instances
 _config: Optional[Config] = None
 _settings: Optional[Settings] = None
+_config_lock = threading.Lock()
+_settings_lock = threading.Lock()
 
 
 def get_config() -> Config:
     """Get global config instance"""
     global _config
     if _config is None:
-        _config = load_config()
+        with _config_lock:
+            if _config is None:
+                _config = load_config()
     return _config
 
 
@@ -289,5 +269,122 @@ def get_env_settings() -> Settings:
     """Get global settings instance"""
     global _settings
     if _settings is None:
-        _settings = get_settings()
+        with _settings_lock:
+            if _settings is None:
+                _settings = get_settings()
     return _settings
+
+
+def set_config(config: Config) -> None:
+    """Replace the global config singleton (thread-safe)."""
+    global _config
+    with _config_lock:
+        _config = config
+
+
+def apply_overrides(base: Config, overrides: dict) -> Config:
+    """
+    Deep-copy *base* config and apply dotted-key overrides.
+
+    Keys use dot notation matching the Config model hierarchy, e.g.
+    ``"research.max_total_tasks": 15``.  String values are coerced to
+    the target field's type (int / float / bool).
+    """
+    data = copy.deepcopy(base.model_dump())
+
+    for dotted_key, value in overrides.items():
+        parts = dotted_key.split(".")
+        target = data
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        field_name = parts[-1]
+
+        # Type coercion: inspect the current value to decide target type
+        current = target.get(field_name)
+        if isinstance(value, str):
+            if isinstance(current, bool):
+                value = value.lower() in ("true", "1", "yes", "on")
+            elif isinstance(current, int):
+                value = int(value)
+            elif isinstance(current, float):
+                value = float(value)
+
+        target[field_name] = value
+
+    return Config(**data)
+
+
+# =============================================================================
+# RESEARCH PRESETS
+# =============================================================================
+
+RESEARCH_PRESETS = {
+    "quick": {
+        "label": "Quick",
+        "description": "Fast overview, 3\u20135 tasks, minimal depth",
+        "overrides": {
+            "research.min_initial_tasks": 3,
+            "research.max_total_tasks": 5,
+            "research.min_words_per_section": 100,
+            "research.max_words_per_section": 500,
+            "research.min_citations_per_section": 1,
+            "research.enable_recursion": False,
+            "research.max_recursion_depth": 0,
+            "research.max_runtime_hours": 1,
+            "research.max_loops": 5,
+            "search.queries_per_task": 1,
+            "search.max_results": 3,
+        },
+    },
+    "standard": {
+        "label": "Standard",
+        "description": "Balanced research, 8\u201315 tasks",
+        "overrides": {
+            "research.min_initial_tasks": 8,
+            "research.max_total_tasks": 15,
+            "research.min_words_per_section": 500,
+            "research.max_words_per_section": 2000,
+            "research.min_citations_per_section": 3,
+            "research.enable_recursion": True,
+            "research.max_recursion_depth": 1,
+            "research.max_runtime_hours": 6,
+            "research.max_loops": 15,
+            "search.queries_per_task": 2,
+            "search.max_results": 5,
+        },
+    },
+    "deep": {
+        "label": "Deep",
+        "description": "Thorough analysis, 15\u201330 tasks, recursive",
+        "overrides": {
+            "research.min_initial_tasks": 15,
+            "research.max_total_tasks": 30,
+            "research.min_words_per_section": 1000,
+            "research.max_words_per_section": 3000,
+            "research.min_citations_per_section": 5,
+            "research.enable_recursion": True,
+            "research.max_recursion_depth": 2,
+            "research.max_runtime_hours": 24,
+            "research.max_loops": 30,
+            "search.queries_per_task": 3,
+            "search.max_results": 8,
+        },
+    },
+    "exhaustive": {
+        "label": "Exhaustive",
+        "description": "Maximum depth, 30\u201350 tasks, deep recursion",
+        "overrides": {
+            "research.min_initial_tasks": 30,
+            "research.max_total_tasks": 50,
+            "research.min_words_per_section": 2000,
+            "research.max_words_per_section": 5000,
+            "research.min_citations_per_section": 8,
+            "research.enable_recursion": True,
+            "research.max_recursion_depth": 3,
+            "research.max_runtime_hours": 48,
+            "research.max_loops": 50,
+            "search.queries_per_task": 4,
+            "search.max_results": 10,
+        },
+    },
+}

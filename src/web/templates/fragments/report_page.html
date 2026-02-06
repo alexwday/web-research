@@ -1,0 +1,75 @@
+{% set sp = "&session=" ~ session_id|string if session_id is defined and session_id else "" %}
+<!-- Top navigation -->
+<div class="page-nav">
+    <button class="btn btn-sm btn-outline"
+            {% if has_prev %}
+            hx-get="/fragments/report-page?page={{ page - 1 }}{{ sp }}"
+            hx-target="#paged-content"
+            hx-swap="innerHTML"
+            {% else %}
+            disabled
+            {% endif %}>
+        &larr; Previous
+    </button>
+
+    <div class="page-indicator">
+        <select onchange="htmx.ajax('GET', '/fragments/report-page?page=' + this.value + '{{ sp }}', {target:'#paged-content', swap:'innerHTML'})">
+            {% for s in sections %}
+            <option value="{{ loop.index0 }}" {% if loop.index0 == page %}selected{% endif %}>
+                {{ loop.index }}. {{ s.topic }}
+            </option>
+            {% endfor %}
+        </select>
+        <span>{{ page + 1 }} / {{ total }}</span>
+    </div>
+
+    <button class="btn btn-sm btn-outline"
+            {% if has_next %}
+            hx-get="/fragments/report-page?page={{ page + 1 }}{{ sp }}"
+            hx-target="#paged-content"
+            hx-swap="innerHTML"
+            {% else %}
+            disabled
+            {% endif %}>
+        Next &rarr;
+    </button>
+</div>
+
+<!-- Section content card -->
+<div class="page-card">
+    <div class="page-section-title">{{ page + 1 }}. {{ section.topic }}</div>
+    <div class="page-section-meta">
+        {{ "{:,}".format(section.word_count) }} words
+        {% if section.citation_count %} &middot; {{ section.citation_count }} citations{% endif %}
+    </div>
+    <div class="report-content">
+        {{ section.html | safe }}
+    </div>
+</div>
+
+<!-- Bottom navigation -->
+<div class="page-nav">
+    <button class="btn btn-sm btn-outline"
+            {% if has_prev %}
+            hx-get="/fragments/report-page?page={{ page - 1 }}{{ sp }}"
+            hx-target="#paged-content"
+            hx-swap="innerHTML"
+            {% else %}
+            disabled
+            {% endif %}>
+        &larr; Previous
+    </button>
+
+    <span class="page-indicator">{{ page + 1 }} / {{ total }}</span>
+
+    <button class="btn btn-sm btn-outline"
+            {% if has_next %}
+            hx-get="/fragments/report-page?page={{ page + 1 }}{{ sp }}"
+            hx-target="#paged-content"
+            hx-swap="innerHTML"
+            {% else %}
+            disabled
+            {% endif %}>
+        Next &rarr;
+    </button>
+</div>

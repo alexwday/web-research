@@ -4,13 +4,12 @@ Contains the Planner, Researcher, and Editor agents
 """
 import json
 import re
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from typing import List, Dict, Any, Tuple
 
-from .config import get_config, ResearchTask, Source, GlossaryTerm, TaskStatus
+from .config import get_config, ResearchTask, TaskStatus
 from .llm_client import get_llm_client
 from .tools import (
-    web_search, extract_source_info, count_words, count_citations,
+    web_search, extract_source_info,
     truncate_to_tokens, generate_file_path
 )
 from .database import get_database
@@ -23,42 +22,38 @@ logger = get_logger(__name__)
 # PROMPTS
 # =============================================================================
 
-PLANNER_SYSTEM_PROMPT = """You are a Research Architect specializing in breaking down complex topics into comprehensive, exhaustive research plans.
+PLANNER_SYSTEM_PROMPT = """You are a Research Architect specializing in breaking down complex topics into comprehensive, in-depth research plans.
 
-Your task is to analyze a research query and create a detailed plan that, when executed, will result in a book-length, comprehensive report covering every aspect of the topic.
+Your task is to analyze a research query and create a detailed plan that, when executed, will result in a comprehensive report covering every important aspect of the topic in depth.
 
-CRITICAL PRIORITY RULES (tasks are executed from highest to lowest priority):
-- Priority 10: Introduction/Overview (MUST be researched first)
-- Priority 9: Historical Background, Core Definitions
-- Priority 7-8: Main body content, analysis, current state
+You will be provided with preliminary web search results to ground your plan in real, current information. Use these results to:
+- Identify the key subtopics, themes, and angles that actually exist in the literature
+- Discover terminology, frameworks, or debates you might not have known about
+- Ensure your plan covers what is actually being discussed, not just what you assume
+
+PRIORITY RULES (tasks are executed from highest to lowest priority):
+- Priority 9-10: Introduction/Overview, Historical Background, Core Definitions (research first to build foundation)
+- Priority 7-8: Main body content, detailed analysis, current state
 - Priority 5-6: Applications, case studies, specific examples
 - Priority 3-4: Edge cases, alternative perspectives, limitations
-- Priority 1-2: Conclusion, Future Directions, Summary (MUST be researched LAST after all other content exists)
+- Priority 1-2: Future Directions, Conclusion/Synthesis (research LAST after all body content exists)
+
+Note: The system will enforce these ordering rules automatically, but setting correct priorities helps produce a coherent report.
 
 GUIDELINES:
-1. Break the topic into logical chapters/sections following academic structure:
-   - Introduction/Overview (priority: 10)
-   - Historical Background/Context (priority: 9)
-   - Core Concepts and Definitions (priority: 9)
-   - Detailed Analysis sections (priority: 7-8)
-   - Current State/Applications (priority: 6-7)
-   - Challenges and Limitations (priority: 4-5)
-   - Future Directions (priority: 2)
-   - Conclusion (priority: 1 - ALWAYS LAST)
-
+1. Break the topic into logical chapters/sections following academic structure
 2. Each task should be specific enough to research in a single focused session
-3. Tasks should build upon each other logically
-4. Include tasks for edge cases, controversies, and alternative perspectives
-5. Prioritize foundational knowledge before advanced topics
-6. Aim for {min_tasks} to {max_tasks} initial tasks
-7. DO NOT include meta-tasks like "Write introduction" - each task should be a RESEARCH topic
+3. Include tasks for edge cases, controversies, and alternative perspectives
+4. Prioritize foundational knowledge before advanced topics
+5. Aim for {min_tasks} to {max_tasks} tasks
+6. Each task must be a RESEARCH topic — not a meta-task like "Write introduction"
+7. Ground your plan in the preliminary search results — do not ignore them
 
 OUTPUT FORMAT:
-You MUST output ONLY a valid JSON object with a "tasks" array. Each task object must have:
+Output ONLY a valid JSON object with a "tasks" array. Each task object must have:
 - "topic": Brief title (max 100 chars)
 - "description": Detailed research instructions (2-4 sentences explaining exactly what to investigate)
-- "priority": 1-10 following the rules above (10 = research first, 1 = research last)
-- "dependencies": List of topic names this depends on (empty for independent tasks)
+- "priority": 1-10 (10 = research first, 1 = research last)
 
 Example:
 {{
@@ -66,47 +61,42 @@ Example:
     {{
       "topic": "Historical Origins of Machine Learning",
       "description": "Research the early history of machine learning from 1950s-1980s. Focus on key papers, pioneering researchers like Alan Turing, Arthur Samuel, and Frank Rosenblatt. Document the evolution from simple perceptrons to early neural networks.",
-      "priority": 9,
-      "dependencies": []
-    }},
-    {{
-      "topic": "Conclusion and Synthesis",
-      "description": "Synthesize all findings into a comprehensive conclusion. Summarize key insights, evaluate the current state of the field, and provide final recommendations.",
-      "priority": 1,
-      "dependencies": ["all other topics"]
+      "priority": 9
     }}
   ]
 }}"""
 
 
-RESEARCHER_SYSTEM_PROMPT = """You are a Deep Research Specialist. Your task is to thoroughly research a specific topic and write a comprehensive, well-cited section for an academic report.
+RESEARCHER_SYSTEM_PROMPT = """You are a Deep Research Specialist writing a section for an academic report.
 
-RESEARCH GUIDELINES:
-1. Use the search results and scraped content provided to write detailed analysis
-2. Be VERBOSE and COMPREHENSIVE - aim for {min_words} to {max_words} words
-3. Include specific facts, figures, dates, and quotes from sources
-4. Cite EVERY claim with the source URL using format: [Source: URL]
-5. Structure with clear headings (## for main, ### for sub)
-6. Define technical terms when first introduced
-7. Include relevant examples and case studies
-8. Address multiple perspectives and controversies if they exist
+WRITING GUIDELINES:
+1. Aim for {min_words}-{max_words} words. Prioritize specific facts, data, and analysis over general statements. Every paragraph should contain at least one concrete claim with a citation. Cut filler.
+2. Include specific facts, figures, dates, and direct quotes from sources
+3. Structure with subheadings (### for main subsections, #### for sub-subsections). Do NOT write a top-level ## heading — the section title is added automatically.
+4. Define technical terms when first introduced
+5. Address multiple perspectives and controversies if they exist
+6. Do not write a general introduction or conclusion for this section — jump directly into the substance
+7. NEVER add disclaimers about sources being unavailable, training data cutoffs, or limitations of your knowledge. You HAVE source material — use it. Do not write "Note on sources" paragraphs.
 
-CITATION REQUIREMENTS:
+CITATION FORMAT:
+- Sources are numbered in the order listed under "Source Material" below
+- Cite using numbered references: [1], [2], etc.
+- Source 1 = first source, Source 2 = second source, and so on
+- Direct quotes: "quoted text" [3]
 - Minimum {min_citations} citations required
-- Use inline citations: [Source: https://example.com]
-- Include direct quotes when appropriate: "quote" [Source: URL]
+- You MUST cite from the provided sources. Do not invent citations.
+
+NOTE: Source content may be truncated. Do not assume you have the complete text of any source.
 
 OUTPUT FORMAT:
-Write the section in Markdown format. 
+Write the section in Markdown format.
 
-IMPORTANT ABOUT NEW TASKS:
-- Only suggest a new sub-topic if it is ABSOLUTELY ESSENTIAL and could not be covered in this section
-- Most research tasks should NOT spawn new tasks
+ABOUT NEW TASKS:
+- Most research tasks should NOT spawn new tasks — only do so if something critical was discovered that cannot be covered here
 - Never suggest more than 1 new task
-- Never suggest tasks that overlap with common research topics like "history", "future", "applications"
-- Set priority to 3 (low) for any suggested task
+- Never suggest tasks that overlap with existing sections listed in the prompt
 
-If you genuinely discover something critical that needs its own section, include at the END:
+If you discover something critical, include at the END of your response:
 
 ```json
 {{
@@ -119,29 +109,44 @@ If you genuinely discover something critical that needs its own section, include
 }}
 ```
 
-For most research tasks, you should NOT include any JSON block - just write the content."""
+For most tasks, do NOT include any JSON block."""
 
 
-EDITOR_SYSTEM_PROMPT = """You are a Research Editor. Your task is to create a polished executive summary and introduction for a comprehensive research report.
+EXEC_SUMMARY_SYSTEM_PROMPT = """You are a Research Editor writing the executive summary for a comprehensive research report.
 
-Based on the research topics and any provided content, write:
-1. An executive summary (300-500 words) highlighting key findings
-2. A compelling introduction that frames the research
-3. Key takeaways or highlights
-
-Write in a professional, academic tone suitable for publication."""
-
-
-QUERY_GENERATOR_PROMPT = """Generate {num_queries} distinct, highly effective search queries to find comprehensive information about:
-
-Topic: {topic}
-Specific Focus: {description}
+Your job is to synthesize the ACTUAL FINDINGS from the section summaries provided — not to restate topic names or write generic filler.
 
 Requirements:
-- Queries should be diverse and cover different aspects
-- Include both broad and specific queries
-- Consider academic, news, and technical sources
-- Each query should be 3-8 words for optimal search results
+- 300-500 words
+- Lead with the single most important finding or insight
+- Reference specific data, facts, or conclusions from the sections
+- Provide context for why this research matters
+- Preview the report structure briefly at the end
+- Professional academic prose; no bullet lists"""
+
+
+CONCLUSION_SYSTEM_PROMPT = """You are a Research Editor writing the conclusion for a comprehensive research report.
+
+Your job is to synthesize findings ACROSS sections, draw connections the individual sections could not, and identify overarching themes.
+
+Requirements:
+- 400-600 words
+- Do NOT simply restate what each section said — find the throughlines
+- Identify 2-3 overarching themes or tensions that emerged
+- Discuss practical implications
+- Propose specific areas for future research (not vague "more research is needed")
+- Professional academic prose; no bullet lists"""
+
+
+QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Generate maximally diverse search queries — each must target a different angle or source type."""
+
+
+QUERY_GENERATOR_PROMPT = """Generate {num_queries} search queries for:
+
+Topic: {topic}
+Focus: {description}
+
+Each query MUST target a different angle (e.g., one broad overview, one specific/technical, one recent data or news). Vary terminology across queries. 3-8 words each.
 
 Output ONLY the queries, one per line, no numbering or bullets."""
 
@@ -152,55 +157,140 @@ Output ONLY the queries, one per line, no numbering or bullets."""
 
 class PlannerAgent:
     """Agent responsible for creating the initial research plan"""
-    
+
     def __init__(self):
-        self.config = get_config()
         self.client = get_llm_client()
         self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
     
     def create_plan(self, query: str, session_id: int) -> List[ResearchTask]:
         """
-        Analyze the query and create a comprehensive research plan
+        Analyze the query and create a comprehensive research plan.
+        Runs preliminary web searches first to ground the plan in real data.
         """
         logger.info(f"Creating research plan for: {query[:100]}...")
-        
+
+        # Pre-search: gather web context so the planner is informed
+        search_context = self._pre_search(query)
+
         # Format the system prompt with config values
+        max_initial = self.config.research.max_total_tasks
+        min_initial = min(self.config.research.min_initial_tasks, max_initial)
         system = PLANNER_SYSTEM_PROMPT.format(
-            min_tasks=self.config.research.min_initial_tasks,
-            max_tasks=self.config.research.max_total_tasks // 2  # Leave room for recursion
+            min_tasks=min_initial,
+            max_tasks=max_initial
         )
-        
+
+        search_block = ""
+        if search_context:
+            search_block = f"""
+
+## Preliminary Web Search Results
+The following search results were gathered to help you understand the current landscape of this topic. Use them to inform your plan.
+
+{search_context}
+
+---
+"""
+
         prompt = f"""Create a comprehensive research plan for the following query:
 
 {query}
+{search_block}
+Create an exhaustive plan covering all important aspects of this topic. The goal is to produce a thorough, in-depth report. Favor deep coverage of each aspect over surface-level breadth."""
 
-Remember to create an exhaustive plan covering all aspects of this topic. The goal is to produce a book-length report that leaves no stone unturned."""
-        
         try:
-            response = self.client.complete(
-                prompt=prompt,
-                system=system,
-                max_tokens=self.config.llm.max_tokens.planner,
-                temperature=self.config.llm.temperature.planner,
-                json_mode=True,
-                model=self.config.llm.models.planner
-            )
-            
-            # Parse the response
-            tasks = self._parse_plan_response(response, session_id)
-            
+            pending_tasks = None
+
+            # Try up to 2 times if the planner returns too few tasks
+            for attempt in range(2):
+                extra_instruction = ""
+                if attempt > 0:
+                    extra_instruction = (
+                        f"\n\nIMPORTANT: Your previous plan only had "
+                        f"{len(pending_tasks)} tasks, but this research "
+                        f"requires at least {min_initial}. Generate MORE "
+                        f"tasks with finer-grained subtopics.\n"
+                    )
+
+                response = self.client.complete(
+                    prompt=prompt + extra_instruction,
+                    system=system,
+                    max_tokens=self.config.llm.max_tokens.planner,
+                    temperature=self.config.llm.temperature.planner,
+                    json_mode=True,
+                    model=self.config.llm.models.planner
+                )
+
+                pending_tasks = self._parse_plan_json(response)
+
+                if len(pending_tasks) >= min_initial:
+                    break
+
+                logger.warning(
+                    f"Planner returned {len(pending_tasks)} tasks, "
+                    f"need {min_initial}+. Retrying with stronger prompt..."
+                )
+
+            # Save to database
+            tasks = self._save_plan_tasks(pending_tasks, session_id)
+
             logger.info(f"Created plan with {len(tasks)} tasks")
             return tasks
-            
+
         except Exception as e:
             logger.error(f"Failed to create plan: {e}")
             raise
+
+    def _pre_search(self, query: str) -> str:
+        """Run preliminary web searches to give the planner real-world context.
+
+        Executes 2 searches: one broad overview query and one more specific
+        angle. Returns formatted context string with titles and snippets.
+        """
+        logger.info("Running pre-planning web searches...")
+
+        queries = [
+            query,
+            f"{query} key topics overview",
+        ]
+
+        seen_urls = set()
+        results = []
+
+        for q in queries:
+            print_search(f"[pre-plan] {q}")
+            hits = web_search(q, max_results=5)
+            for hit in hits:
+                url = hit.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append(hit)
+
+        if not results:
+            logger.warning("Pre-planning search returned no results")
+            return ""
+
+        # Build compact context: title + snippet (no full content needed)
+        parts = []
+        for i, r in enumerate(results[:10], 1):
+            title = r.get("title", "Untitled")
+            snippet = r.get("snippet", "")
+            url = r.get("url", "")
+            parts.append(f"{i}. **{title}**\n   {snippet}\n   Source: {url}")
+
+        context = "\n\n".join(parts)
+        logger.info(f"Pre-planning search found {len(results)} results")
+        return context
     
-    def _parse_plan_response(self, response: str, session_id: int) -> List[ResearchTask]:
-        """Parse the planner's JSON response into ResearchTask objects"""
+    def _parse_plan_json(self, response: str) -> List[dict]:
+        """Parse the planner's JSON response into a list of task dicts (no DB writes)."""
         try:
             data = json.loads(response)
-            
+
             # Handle various response formats
             if isinstance(data, list):
                 task_list = data
@@ -209,61 +299,58 @@ Remember to create an exhaustive plan covering all aspects of this topic. The go
             elif "plan" in data:
                 task_list = data["plan"]
             else:
-                # Try to find any list in the response
                 for value in data.values():
                     if isinstance(value, list):
                         task_list = value
                         break
                 else:
                     raise ValueError("Could not find task list in response")
-            
-            tasks = []
-            output_dir = self.config.output.directory
-            
-            # Keywords that indicate tasks that should run last
-            conclusion_keywords = ['conclusion', 'summary', 'synthesis', 'final', 'closing', 'wrap-up', 'recap']
-            future_keywords = ['future', 'outlook', 'prediction', 'forecast', 'next steps']
-            intro_keywords = ['introduction', 'overview', 'background', 'foundation', 'basics', 'fundamentals']
-            
-            for i, item in enumerate(task_list):
-                topic = item.get("topic", f"Task {i+1}")
-                topic_lower = topic.lower()
-                priority = item.get("priority", 5)
-                
-                # Enforce priority rules based on topic content
-                if any(kw in topic_lower for kw in conclusion_keywords):
-                    priority = 1  # Conclusion always last
-                elif any(kw in topic_lower for kw in future_keywords):
-                    priority = 2  # Future directions second to last
-                elif any(kw in topic_lower for kw in intro_keywords) and priority < 9:
-                    priority = max(priority, 9)  # Intro should be early
-                
-                task = ResearchTask(
-                    topic=topic,
-                    description=item.get("description", ""),
-                    file_path=generate_file_path(
-                        topic,
-                        output_dir,
-                        i + 1
-                    ),
-                    priority=priority,
-                    depth=0,
-                    status=TaskStatus.PENDING
-                )
-                
-                # Save to database
-                saved_task = self.db.add_task(task, session_id)
-                tasks.append(saved_task)
-            
-            # Update session with task count
-            self.db.update_session(session_id, total_tasks=len(tasks))
-            
-            return tasks
-            
+
+            max_tasks = self.config.research.max_total_tasks
+            return task_list[:max_tasks]
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse plan JSON: {e}")
             logger.debug(f"Response was: {response[:500]}")
             raise
+
+    def _save_plan_tasks(self, task_list: List[dict], session_id: int) -> List[ResearchTask]:
+        """Apply priority rules, create ResearchTask objects, and insert into DB."""
+        output_dir = self.config.output.directory
+
+        # Structural keywords — only unambiguous terms to avoid misclassifying
+        # content topics (e.g. "Protein Synthesis" should NOT match "synthesis")
+        conclusion_keywords = ['conclusion', 'closing remarks', 'wrap-up', 'recap', 'final thoughts', 'key takeaways']
+        future_keywords = ['future', 'outlook', 'prediction', 'forecast', 'next steps']
+        intro_keywords = ['introduction', 'overview', 'background', 'foundation', 'basics', 'fundamentals']
+
+        pending_tasks = []
+        for i, item in enumerate(task_list):
+            topic = item.get("topic", f"Task {i+1}")
+            topic_lower = topic.lower()
+            priority = item.get("priority", 5)
+
+            # Enforce priority rules — use startswith for conclusion/future
+            # to avoid false positives on content topics
+            if any(topic_lower.startswith(kw) for kw in conclusion_keywords):
+                priority = 1
+            elif any(topic_lower.startswith(kw) for kw in future_keywords):
+                priority = 2
+            elif any(kw in topic_lower for kw in intro_keywords) and priority < 9:
+                priority = max(priority, 9)
+
+            pending_tasks.append(ResearchTask(
+                topic=topic,
+                description=item.get("description", ""),
+                file_path=generate_file_path(topic, output_dir, i + 1),
+                priority=priority,
+                depth=0,
+                status=TaskStatus.PENDING
+            ))
+
+        tasks = self.db.add_tasks_bulk(pending_tasks, session_id)
+        self.db.update_session(session_id, total_tasks=len(tasks))
+        return tasks
 
 
 # =============================================================================
@@ -272,37 +359,56 @@ Remember to create an exhaustive plan covering all aspects of this topic. The go
 
 class ResearcherAgent:
     """Agent responsible for deep research on individual topics"""
-    
+
     def __init__(self):
-        self.config = get_config()
         self.client = get_llm_client()
         self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
     
-    def research_task(self, task: ResearchTask) -> Tuple[str, List[Dict], List[Dict]]:
+    def research_task(
+        self,
+        task: ResearchTask,
+        overall_query: str = "",
+        other_sections: List[str] = None,
+        session_id: int = None
+    ) -> Tuple[str, List[Dict], List[Dict]]:
         """
         Perform deep research on a single task
         Returns: (content, new_tasks, glossary_terms)
         """
         logger.info(f"Researching: {task.topic}")
-        
+
         # Mark task as in progress
         self.db.update_task(task.id, status=TaskStatus.IN_PROGRESS)
-        
+
         try:
             # Step 1: Generate search queries
             queries = self._generate_queries(task)
-            
+
             # Step 2: Execute searches and gather content
             search_context = self._execute_searches(queries, task.id)
-            
+
+            # Handle empty search results
+            if not search_context or not search_context.strip():
+                logger.warning(f"No sources found for task: {task.topic}")
+                search_context = (
+                    "WARNING: No source material was found for this topic. "
+                    "Write based on your training knowledge and clearly note "
+                    "that sources were unavailable."
+                )
+
             # Step 3: Synthesize and write
-            content, new_tasks, glossary_terms = self._synthesize(task, search_context)
-            
+            content, new_tasks, glossary_terms = self._synthesize(
+                task, search_context, overall_query, other_sections, session_id=session_id
+            )
+
             return content, new_tasks, glossary_terms
-            
+
         except Exception as e:
             logger.error(f"Research failed for task {task.id}: {e}")
-            self.db.mark_task_failed(task.id, str(e))
             raise
     
     def _generate_queries(self, task: ResearchTask) -> List[str]:
@@ -312,9 +418,10 @@ class ResearcherAgent:
             topic=task.topic,
             description=task.description
         )
-        
+
         response = self.client.complete(
             prompt=prompt,
+            system=QUERY_GENERATOR_SYSTEM,
             max_tokens=500,
             temperature=0.5,
             model=self.config.llm.models.researcher
@@ -362,19 +469,23 @@ class ResearcherAgent:
                     logger.debug(f"Skipping low-quality source: {url}")
                     continue
                 
-                # Save source to database
-                self.db.add_source(source, task_id)
+                # Save source to database (position preserves citation order)
+                self.db.add_source(source, task_id, position=sources_added)
                 
-                # Build context
+                # Build context — use configured max_content_length
                 content = source.full_content or source.snippet or ""
+                max_len = self.config.scraping.max_content_length
                 if content:
+                    content_str = content[:max_len]
+                    if len(content) > max_len:
+                        content_str += "\n[... content truncated ...]"
                     context_parts.append(f"""
 ### Source: {source.title}
 URL: {source.url}
 Domain: {source.domain}
 {'[Academic Source]' if source.is_academic else ''}
 
-{content[:8000]}
+{content_str}
 """)
                     sources_added += 1
                     
@@ -388,35 +499,46 @@ Domain: {source.domain}
         return "\n\n---\n\n".join(context_parts)
     
     def _synthesize(
-        self, 
-        task: ResearchTask, 
-        search_context: str
+        self,
+        task: ResearchTask,
+        search_context: str,
+        overall_query: str = "",
+        other_sections: List[str] = None,
+        session_id: int = None
     ) -> Tuple[str, List[Dict], List[Dict]]:
         """Synthesize research into written content"""
-        
+
         # Truncate context if too long
         max_context_tokens = 50000  # Leave room for prompt and response
         search_context = truncate_to_tokens(search_context, max_context_tokens)
-        
+
         system = RESEARCHER_SYSTEM_PROMPT.format(
             min_words=self.config.research.min_words_per_section,
             max_words=self.config.research.max_words_per_section,
             min_citations=self.config.research.min_citations_per_section
         )
-        
-        prompt = f"""Research and write a comprehensive section on the following topic:
 
-## Topic: {task.topic}
+        # Build other-sections context
+        other_sections_text = ""
+        if other_sections:
+            other_sections_text = "\n## Other Sections in This Report (do not repeat their content):\n"
+            other_sections_text += "\n".join(f"- {s}" for s in other_sections)
+            other_sections_text += "\n"
+
+        prompt = f"""Write a section for a research report on: **{overall_query}**
+
+## This Section: {task.topic}
 
 ## Research Instructions:
 {task.description}
-
+{other_sections_text}
 ## Source Material:
 {search_context}
 
 ---
 
-Write a detailed, well-cited section now. Be thorough and comprehensive.
+Write this section assuming the reader will read the full report. Do not write a general
+introduction or conclusion for this section — jump directly into the substance.
 If you discover important sub-topics that need separate investigation, include them in the JSON block at the end."""
         
         response = self.client.complete(
@@ -428,14 +550,15 @@ If you discover important sub-topics that need separate investigation, include t
         )
         
         # Parse response for content, new tasks, and glossary
-        content, new_tasks, glossary_terms = self._parse_research_response(response, task)
-        
+        content, new_tasks, glossary_terms = self._parse_research_response(response, task, session_id=session_id)
+
         return content, new_tasks, glossary_terms
-    
+
     def _parse_research_response(
-        self, 
-        response: str, 
-        task: ResearchTask
+        self,
+        response: str,
+        task: ResearchTask,
+        session_id: int = None
     ) -> Tuple[str, List[Dict], List[Dict]]:
         """Parse the researcher's response"""
         content = response
@@ -449,52 +572,56 @@ If you discover important sub-topics that need separate investigation, include t
         )
         
         # Check total task limit
-        total_tasks = self.db.get_task_count()
+        total_tasks = self.db.get_task_count(session_id=session_id)
         at_task_limit = total_tasks >= self.config.research.max_total_tasks
         
-        # Try to extract JSON block
-        if "```json" in response:
+        # Try to extract JSON block — handle both fenced (```json...```) and naked JSON
+        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        if not json_match:
+            # Look for naked JSON containing new_tasks or glossary_terms near end of response
+            json_match = re.search(
+                r'(\{\s*"(?:new_tasks|glossary_terms)".*\})\s*$',
+                response, re.DOTALL
+            )
+
+        if json_match:
             try:
-                json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                    data = json.loads(json_str)
-                    
-                    # Extract new tasks if allowed - LIMIT TO 1 MAX
-                    if can_recurse and not at_task_limit:
-                        raw_tasks = data.get("new_tasks", [])
-                        # Only take the first task to prevent task explosion
-                        for t in raw_tasks[:1]:
-                            if isinstance(t, dict) and "topic" in t:
-                                # Check if this task is too similar to existing tasks
-                                topic = t["topic"]
-                                existing_tasks = self.db.get_all_tasks()
-                                is_duplicate = any(
-                                    topic.lower() in et.topic.lower() or et.topic.lower() in topic.lower()
-                                    for et in existing_tasks
-                                )
-                                
-                                if not is_duplicate:
-                                    new_tasks.append({
-                                        "topic": topic,
-                                        "description": t.get("description", ""),
-                                        "priority": min(t.get("priority", 3), 4),  # Cap at 4 for discovered tasks
-                                        "parent_id": task.id,
-                                        "depth": task.depth + 1
-                                    })
-                    
-                    # Extract glossary terms
-                    raw_glossary = data.get("glossary_terms", [])
-                    for g in raw_glossary:
-                        if isinstance(g, dict) and "term" in g and "definition" in g:
-                            glossary_terms.append({
-                                "term": g["term"],
-                                "definition": g["definition"]
-                            })
-                    
-                    # Remove JSON block from content
-                    content = response[:json_match.start()].strip()
-                    
+                json_str = json_match.group(1)
+                data = json.loads(json_str)
+
+                # Extract new tasks if allowed - LIMIT TO 1 MAX
+                if can_recurse and not at_task_limit:
+                    raw_tasks = data.get("new_tasks", [])
+                    for t in raw_tasks[:1]:
+                        if isinstance(t, dict) and "topic" in t:
+                            topic = t["topic"]
+                            existing_tasks = self.db.get_all_tasks(session_id=session_id)
+                            is_duplicate = any(
+                                topic.lower() in et.topic.lower() or et.topic.lower() in topic.lower()
+                                for et in existing_tasks
+                            )
+
+                            if not is_duplicate:
+                                new_tasks.append({
+                                    "topic": topic,
+                                    "description": t.get("description", ""),
+                                    "priority": min(t.get("priority", 3), 4),
+                                    "parent_id": task.id,
+                                    "depth": task.depth + 1
+                                })
+
+                # Extract glossary terms
+                raw_glossary = data.get("glossary_terms", [])
+                for g in raw_glossary:
+                    if isinstance(g, dict) and "term" in g and "definition" in g:
+                        glossary_terms.append({
+                            "term": g["term"],
+                            "definition": g["definition"]
+                        })
+
+                # Remove JSON block from content
+                content = response[:json_match.start()].strip()
+
             except (json.JSONDecodeError, AttributeError) as e:
                 logger.debug(f"Could not parse JSON block: {e}")
         
@@ -507,70 +634,76 @@ If you discover important sub-topics that need separate investigation, include t
 
 class EditorAgent:
     """Agent responsible for final compilation and editing"""
-    
+
     def __init__(self):
-        self.config = get_config()
         self.client = get_llm_client()
         self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
     
-    def generate_executive_summary(self, query: str, topics: List[str]) -> str:
-        """Generate an executive summary for the report"""
+    def generate_executive_summary(self, query: str, section_summaries: List[Dict[str, str]]) -> str:
+        """Generate an executive summary for the report.
+
+        Args:
+            query: The original research query
+            section_summaries: List of dicts with 'topic' and 'summary' keys
+        """
         logger.info("Generating executive summary...")
-        
-        topics_text = "\n".join(f"- {t}" for t in topics[:30])
-        
-        prompt = f"""Based on the following research query and topics covered, write an executive summary.
 
-Original Research Query:
-{query}
+        sections_text = "\n\n".join(
+            f"### {s['topic']}\n{s['summary']}" for s in section_summaries
+        )
 
-Topics Researched:
-{topics_text}
+        prompt = f"""Write an executive summary for this research report.
 
-Write a compelling executive summary (300-500 words) that:
-1. Introduces the research topic and its significance
-2. Highlights key themes and findings
-3. Provides context for why this research matters
-4. Previews the structure of the report"""
-        
+Research Query: {query}
+
+Section Findings:
+{sections_text}
+
+Synthesize the actual findings above into a 300-500 word executive summary."""
+
         response = self.client.complete(
             prompt=prompt,
-            system=EDITOR_SYSTEM_PROMPT,
+            system=EXEC_SUMMARY_SYSTEM_PROMPT,
             max_tokens=self.config.llm.max_tokens.editor,
             temperature=self.config.llm.temperature.editor,
             model=self.config.llm.models.editor
         )
-        
+
         return response
     
-    def generate_conclusion(self, query: str, topics: List[str], word_count: int) -> str:
-        """Generate a conclusion for the report"""
+    def generate_conclusion(self, query: str, section_summaries: List[Dict[str, str]], word_count: int) -> str:
+        """Generate a conclusion for the report.
+
+        Args:
+            query: The original research query
+            section_summaries: List of dicts with 'topic' and 'summary' keys
+            word_count: Total words in the report body
+        """
         logger.info("Generating conclusion...")
-        
-        topics_text = "\n".join(f"- {t}" for t in topics[:30])
-        
-        prompt = f"""Based on the following research, write a comprehensive conclusion.
 
-Original Research Query:
-{query}
+        sections_text = "\n\n".join(
+            f"### {s['topic']}\n{s['summary']}" for s in section_summaries
+        )
 
-Topics Covered:
-{topics_text}
+        prompt = f"""Write a conclusion for this research report ({word_count:,} words across {len(section_summaries)} sections).
 
-Total Words Written: {word_count:,}
+Research Query: {query}
 
-Write a thoughtful conclusion (400-600 words) that:
-1. Synthesizes the key findings
-2. Discusses implications
-3. Identifies areas for future research
-4. Provides final thoughts and recommendations"""
-        
+Section Findings:
+{sections_text}
+
+Write a 400-600 word conclusion that synthesizes findings across sections, identifies overarching themes, and proposes specific future research directions."""
+
         response = self.client.complete(
             prompt=prompt,
-            system=EDITOR_SYSTEM_PROMPT,
+            system=CONCLUSION_SYSTEM_PROMPT,
             max_tokens=self.config.llm.max_tokens.editor,
             temperature=self.config.llm.temperature.editor,
             model=self.config.llm.models.editor
         )
-        
+
         return response

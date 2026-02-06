@@ -6,14 +6,18 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
-from jinja2 import Template, Environment
+from jinja2 import Environment
+from markupsafe import Markup
 
-from .config import get_config, ResearchTask, Source, GlossaryTerm
+from .config import get_config, Source, GlossaryTerm
 from .database import get_database
 from .tools import read_file, ensure_directory, count_words
 from .logger import get_logger, print_success, print_info
+
+# Regex for numbered citations like [1], [2] — avoid matching inside markdown links [text](url)
+_CITATION_RE = re.compile(r'(?<!\])\[(\d+)\](?!\()')
 
 logger = get_logger(__name__)
 
@@ -381,51 +385,74 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 class ReportCompiler:
     """Compiles research into final report formats"""
-    
+
     def __init__(self):
-        self.config = get_config()
         self.db = get_database()
+        self._used_slugs: set = set()
+
+    @property
+    def config(self):
+        return get_config()
     
     def compile_report(
         self,
         query: str,
         executive_summary: str = None,
         conclusion: str = None,
-        duration_seconds: float = 0
+        duration_seconds: float = 0,
+        session_id: int = None,
+        pre_read_chapters: List[Dict] = None
     ) -> Dict[str, str]:
         """
         Compile all research into final report formats
         Returns dict of format -> file path
         """
         logger.info("Compiling final report...")
-        
-        # Gather all content
-        tasks = self.db.get_all_tasks()
+
+        # Reset slug tracker for this compilation
+        self._used_slugs = set()
+
+        # Gather all content (scoped to session when provided)
+        tasks = self.db.get_all_tasks(session_id=session_id)
         completed_tasks = [t for t in tasks if t.status == "completed"]
-        sources = self.db.get_all_sources()
-        glossary_terms = self.db.get_all_glossary_terms()
-        
-        # Read all chapter files
-        chapters = []
-        for task in completed_tasks:
-            content = read_file(task.file_path)
-            if content:
-                chapters.append({
-                    "task": task,
-                    "content": content
-                })
-        
+        if session_id is not None:
+            glossary_terms = self.db.get_glossary_terms_for_session(session_id)
+        else:
+            glossary_terms = self.db.get_all_glossary_terms()
+
+        # Use pre-read chapters if provided, otherwise read files
+        if pre_read_chapters is not None:
+            chapters = pre_read_chapters
+        else:
+            chapters = []
+            for task in completed_tasks:
+                content = read_file(task.file_path)
+                if content:
+                    chapters.append({
+                        "task": task,
+                        "content": content
+                    })
+
         # Sort by file path (which includes order number)
         chapters.sort(key=lambda x: x["task"].file_path)
+
+        # Build global source list with citation remapping per chapter
+        global_sources, chapters = self._build_global_sources(chapters)
         
         # Calculate statistics
         total_words = sum(count_words(c["content"]) for c in chapters)
         
+        sources = global_sources
+
         # Generate outputs
         output_files = {}
-        output_dir = ensure_directory(self.config.output.directory)
+        base_output_dir = self.config.output.directory
+        if session_id is not None:
+            output_dir = ensure_directory(f"{base_output_dir}/session_{session_id}")
+        else:
+            output_dir = ensure_directory(base_output_dir)
         report_name = self.config.output.report_name
-        
+
         for fmt in self.config.output.formats:
             if fmt == "markdown":
                 path = self._compile_markdown(
@@ -439,7 +466,7 @@ class ReportCompiler:
                     total_words
                 )
                 output_files["markdown"] = str(path)
-                
+
             elif fmt == "html":
                 path = self._compile_html(
                     output_dir / f"{report_name}.html",
@@ -453,7 +480,7 @@ class ReportCompiler:
                     duration_seconds
                 )
                 output_files["html"] = str(path)
-                
+
             elif fmt == "pdf":
                 # PDF requires HTML first
                 html_path = self._compile_html(
@@ -474,11 +501,58 @@ class ReportCompiler:
                 if pdf_path:
                     output_files["pdf"] = str(pdf_path)
                     # Clean up temp HTML
-                    os.remove(html_path)
+                    try:
+                        os.remove(html_path)
+                    except OSError:
+                        pass
         
         print_success(f"Report compiled: {', '.join(output_files.keys())}")
         return output_files
     
+    def _build_global_sources(self, chapters: List[Dict]) -> tuple:
+        """Build a global deduplicated source list and remap citations in each chapter.
+
+        Returns (global_sources, updated_chapters) where citations in each
+        chapter's content have been rewritten to match global numbering.
+        """
+        global_sources: List[Source] = []
+        url_to_global: Dict[str, int] = {}  # url -> 1-indexed global number
+
+        updated_chapters = []
+        for chapter in chapters:
+            task = chapter["task"]
+            task_sources = self.db.get_sources_for_task(task.id)
+
+            # local_to_global mapping for this chapter
+            local_to_global: Dict[int, int] = {}
+            for local_idx, source in enumerate(task_sources, 1):
+                if source.url not in url_to_global:
+                    global_sources.append(source)
+                    url_to_global[source.url] = len(global_sources)
+                local_to_global[local_idx] = url_to_global[source.url]
+
+            # Remap citations in content
+            remapped_content = self._remap_citations(chapter["content"], local_to_global)
+            updated_chapters.append({
+                "task": task,
+                "content": remapped_content,
+            })
+
+        return global_sources, updated_chapters
+
+    @staticmethod
+    def _remap_citations(content: str, mapping: Dict[int, int]) -> str:
+        """Rewrite [N] citation numbers using the provided mapping."""
+        if not mapping:
+            return content
+
+        def _replace(match):
+            local_num = int(match.group(1))
+            global_num = mapping.get(local_num, local_num)
+            return f"[{global_num}]"
+
+        return _CITATION_RE.sub(_replace, content)
+
     def _compile_markdown(
         self,
         output_path: Path,
@@ -528,6 +602,9 @@ class ReportCompiler:
         # Main Content
         for chapter in chapters:
             content = chapter["content"]
+            # Add section heading
+            lines.append(f"## {chapter['task'].topic}")
+            lines.append("")
             # Ensure proper heading levels
             content = self._normalize_headings(content)
             lines.append(content)
@@ -609,11 +686,12 @@ class ReportCompiler:
         for chapter in chapters:
             task = chapter["task"]
             md_content = chapter["content"]
-            
+
             # Add anchor for TOC
             anchor = self._slugify(task.topic)
-            content_parts.append(f'<section id="{anchor}">')
-            
+            content_parts.append(f'<section>')
+            content_parts.append(f'<h2 id="{anchor}">{task.topic}</h2>')
+
             # Convert markdown to HTML
             html_content = markdown.markdown(
                 md_content,
@@ -636,8 +714,8 @@ class ReportCompiler:
         else:
             duration = f"{duration_seconds:.0f} seconds"
         
-        # Create Jinja environment with custom filters
-        env = Environment()
+        # Create Jinja environment with custom filters and autoescape
+        env = Environment(autoescape=True)
         env.filters['format_number'] = lambda x: f"{x:,}"
         template = env.from_string(HTML_TEMPLATE)
         
@@ -660,7 +738,8 @@ class ReportCompiler:
                     "definition": term.definition
                 })
         
-        # Render HTML
+        # Render HTML — mark pre-rendered HTML as safe; scalar strings
+        # (title, subtitle, duration) remain auto-escaped by Jinja2.
         html = template.render(
             title="Deep Research Report",
             subtitle=query[:200],
@@ -669,7 +748,7 @@ class ReportCompiler:
             source_count=len(sources),
             section_count=len(chapters),
             toc=toc if self.config.output.include_toc else None,
-            content="\n".join(content_parts),
+            content=Markup("\n".join(content_parts)),
             glossary=glossary if glossary else None,
             bibliography=bibliography if bibliography else None,
             duration=duration
@@ -697,12 +776,21 @@ class ReportCompiler:
             return None
     
     def _slugify(self, text: str) -> str:
-        """Convert text to URL-friendly slug"""
-        text = text.lower()
-        text = re.sub(r'[^\w\s-]', '', text)
-        text = re.sub(r'[\s_]+', '-', text)
-        text = re.sub(r'-+', '-', text)
-        return text.strip('-')
+        """Convert text to URL-friendly slug, deduplicating across a compilation."""
+        slug = text.lower()
+        slug = re.sub(r'[^\w\s-]', '', slug)
+        slug = re.sub(r'[\s_]+', '-', slug)
+        slug = re.sub(r'-+', '-', slug)
+        slug = slug.strip('-')
+
+        # Deduplicate
+        original = slug
+        counter = 2
+        while slug in self._used_slugs:
+            slug = f"{original}-{counter}"
+            counter += 1
+        self._used_slugs.add(slug)
+        return slug
     
     def _normalize_headings(self, content: str) -> str:
         """Ensure headings are properly formatted"""

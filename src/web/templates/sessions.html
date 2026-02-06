@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Sessions – Deep Research Agent{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Research Sessions</h1>
+
+{% if session_rows %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Query</th>
+            <th>Status</th>
+            <th>Tasks</th>
+            <th>Words</th>
+            <th>Sources</th>
+            <th>Started</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in session_rows %}
+        {% set s = row.session %}
+        {% set st = row.stats %}
+        <tr>
+            <td>{{ s.id }}</td>
+            <td>{{ s.query[:80] }}{% if s.query|length > 80 %}...{% endif %}</td>
+            <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+            <td>{{ st.completed_tasks }}/{{ st.total_tasks }}</td>
+            <td>{{ "{:,}".format(st.total_words) }}</td>
+            <td>{{ st.total_sources }}</td>
+            <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') if s.started_at else '-' }}</td>
+            <td>
+                <a href="/dashboard?session={{ s.id }}" class="btn btn-sm btn-outline">View</a>
+                {% if s.report_html_path %}
+                <a href="/report?session={{ s.id }}" class="btn btn-sm btn-primary">Report</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+    <p>No sessions yet.</p>
+    <p>Start a research session from the <a href="/dashboard">Dashboard</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

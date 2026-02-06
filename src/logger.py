@@ -2,12 +2,9 @@
 Logging Module for Deep Research Agent
 Provides rich console output and file logging
 """
-import os
-import sys
 import logging
+import logging.handlers
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -15,7 +12,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
-from rich.live import Live
 
 from .config import get_config
 
@@ -89,9 +85,6 @@ class ResearchLogger:
     def exception(self, msg: str, *args, **kwargs):
         self.logger.exception(msg, *args, **kwargs)
 
-
-# Need to import after logging is configured
-import logging.handlers
 
 # Logger cache
 _loggers = {}

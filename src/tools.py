@@ -2,22 +2,20 @@
 Tools Module for Deep Research Agent
 Handles web search, content extraction, and file operations
 """
-import os
 import re
 import time
 import random
-import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse
-from functools import wraps
 
+import ipaddress
 import requests
 from bs4 import BeautifulSoup
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from .config import get_config, get_env_settings, Source, SearchProvider
+from .config import get_config, get_env_settings, Source
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -140,107 +138,11 @@ def search_tavily(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         return []
 
 
-def search_serper(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """Search using Serper API"""
-    settings = get_env_settings()
-    
-    if not settings.serper_api_key:
-        raise ValueError("SERPER_API_KEY not set in environment")
-    
-    try:
-        # Apply rate limiting
-        get_search_limiter().wait()
-        
-        logger.debug(f"Searching Serper: {query}")
-        
-        response = requests.post(
-            "https://google.serper.dev/search",
-            headers={
-                "X-API-KEY": settings.serper_api_key,
-                "Content-Type": "application/json"
-            },
-            json={"q": query, "num": max_results},
-            timeout=10
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        results = []
-        
-        for r in data.get('organic', [])[:max_results]:
-            results.append({
-                'url': r.get('link', ''),
-                'title': r.get('title', ''),
-                'snippet': r.get('snippet', ''),
-                'score': 0.5
-            })
-        
-        return results
-        
-    except Exception as e:
-        logger.error(f"Serper search error: {e}")
-        return []
-
-
-def search_brave(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """Search using Brave Search API"""
-    settings = get_env_settings()
-    
-    if not settings.brave_api_key:
-        raise ValueError("BRAVE_API_KEY not set in environment")
-    
-    try:
-        # Apply rate limiting
-        get_search_limiter().wait()
-        
-        logger.debug(f"Searching Brave: {query}")
-        
-        response = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers={
-                "X-Subscription-Token": settings.brave_api_key,
-                "Accept": "application/json"
-            },
-            params={"q": query, "count": max_results},
-            timeout=10
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        results = []
-        
-        for r in data.get('web', {}).get('results', [])[:max_results]:
-            results.append({
-                'url': r.get('url', ''),
-                'title': r.get('title', ''),
-                'snippet': r.get('description', ''),
-                'score': 0.5
-            })
-        
-        return results
-        
-    except Exception as e:
-        logger.error(f"Brave search error: {e}")
-        return []
-
-
 def web_search(query: str, max_results: int = None) -> List[Dict[str, Any]]:
-    """
-    Unified search function that uses the configured provider
-    """
+    """Search using Tavily API"""
     config = get_config()
     max_results = max_results or config.search.max_results
-    
-    provider = config.search.provider
-    
-    if provider == SearchProvider.TAVILY:
-        return search_tavily(query, max_results)
-    elif provider == SearchProvider.SERPER:
-        return search_serper(query, max_results)
-    elif provider == SearchProvider.BRAVE:
-        return search_brave(query, max_results)
-    else:
-        raise ValueError(f"Unknown search provider: {provider}")
+    return search_tavily(query, max_results)
 
 
 # =============================================================================
@@ -256,7 +158,7 @@ def get_domain(url: str) -> str:
         if domain.startswith('www.'):
             domain = domain[4:]
         return domain
-    except:
+    except Exception:
         return ""
 
 
@@ -308,6 +210,25 @@ def calculate_quality_score(url: str, title: str, content: str) -> float:
     return min(max(score, 0.0), 1.0)
 
 
+def _validate_url(url: str) -> None:
+    """Validate that a URL is safe to fetch (prevent SSRF)."""
+    import socket
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL has no hostname")
+    try:
+        resolved = socket.getaddrinfo(hostname, None)
+        for family, _type, proto, canonname, sockaddr in resolved:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                raise ValueError(f"URL resolves to non-public address: {ip}")
+    except socket.gaierror:
+        pass  # DNS resolution failed — let requests handle it
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -319,10 +240,13 @@ def scrape_url(url: str) -> Tuple[str, str]:
     Returns: (title, content)
     """
     config = get_config()
-    
+
+    # Validate URL to prevent SSRF
+    _validate_url(url)
+
     # Apply rate limiting
     get_scrape_limiter().wait()
-    
+
     logger.debug(f"Scraping: {url}")
     
     # Get random user agent
@@ -345,22 +269,20 @@ def scrape_url(url: str) -> Tuple[str, str]:
         )
         response.raise_for_status()
         
-        # Try trafilatura first (better extraction)
+        # Try trafilatura first (better extraction) — pass already-fetched HTML
         try:
             import trafilatura
-            downloaded = trafilatura.fetch_url(url)
-            if downloaded:
-                content = trafilatura.extract(
-                    downloaded,
-                    include_comments=False,
-                    include_tables=True,
-                    no_fallback=False
-                )
-                if content and len(content) > 200:
-                    # Get title separately
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    title = soup.title.string if soup.title else ""
-                    return title.strip() if title else "", content[:config.scraping.max_content_length]
+            content = trafilatura.extract(
+                response.text,
+                include_comments=False,
+                include_tables=True,
+                no_fallback=False
+            )
+            if content and len(content) > 200:
+                # Get title separately
+                soup = BeautifulSoup(response.content, 'html.parser')
+                title = (soup.title.string or "") if soup.title else ""
+                return title.strip(), content[:config.scraping.max_content_length]
         except ImportError:
             pass
         except Exception as e:
@@ -418,13 +340,13 @@ def extract_source_info(url: str, search_result: Dict[str, Any] = None) -> Sourc
     title = search_result.get('title', '') if search_result else ''
     snippet = search_result.get('snippet', '') if search_result else ''
     
-    # First, try to use raw_content from Tavily search results (already fetched)
+    # Try to use raw_content from Tavily search results (already fetched)
     full_content = ""
     if search_result and search_result.get('raw_content'):
         full_content = search_result['raw_content']
         logger.debug(f"Using Tavily raw_content for {url[:50]}...")
     else:
-        # Fall back to scraping if no raw_content (e.g., Serper/Brave results)
+        # Fall back to scraping if no raw_content available
         try:
             scraped_title, scraped_content = scrape_url(url)
             if scraped_title and not title:
@@ -445,7 +367,7 @@ def extract_source_info(url: str, search_result: Dict[str, Any] = None) -> Sourc
         full_content=full_content,
         quality_score=quality_score,
         is_academic=is_academic,
-        accessed_at=datetime.utcnow()
+        accessed_at=datetime.now(timezone.utc)
     )
 
 
@@ -502,22 +424,30 @@ def count_words(text: str) -> int:
 
 
 def count_citations(text: str) -> int:
-    """Count citations in text (looks for [Source: ...] or URLs)"""
+    """Count citations in text (looks for [1], [2] style, [Source: ...], or URLs)"""
     if not text:
         return 0
-    
-    # Count [Source: ...] patterns
+
+    # Primary: count [1], [2] style numbered citations (what the LLM actually produces)
+    # Negative lookbehind for '](' to avoid matching markdown link text like [text](url)
+    numbered_pattern = r'\[(\d+)\](?!\()'
+    numbered = len(re.findall(numbered_pattern, text))
+
+    if numbered > 0:
+        return numbered
+
+    # Fallback: count [Source: ...] patterns
     citation_pattern = r'\[Source:.*?\]'
     citations = len(re.findall(citation_pattern, text, re.IGNORECASE))
-    
+
     # Count inline URLs
     url_pattern = r'https?://[^\s\]\)>]+'
     urls = len(re.findall(url_pattern, text))
-    
+
     # Count markdown footnotes
     footnote_pattern = r'\[\^\d+\]'
     footnotes = len(re.findall(footnote_pattern, text))
-    
+
     return max(citations, urls // 2, footnotes)
 
 
@@ -548,46 +478,44 @@ def generate_file_path(topic: str, output_dir: str = "report", index: int = None
 # TOKEN COUNTING
 # =============================================================================
 
-def count_tokens(text: str, model: str = "gpt-4") -> int:
+def _resolve_tiktoken_model(model: str = None) -> str:
+    """Resolve the model name for tiktoken. Falls back to config writer model."""
+    if model is None:
+        model = get_config().llm.models.writer
+    return model
+
+
+def count_tokens(text: str, model: str = None) -> int:
     """
     Estimate token count for text
     Uses tiktoken if available, otherwise rough estimate
     """
+    model = _resolve_tiktoken_model(model)
     try:
         import tiktoken
-        
-        # Map model names to encoding
-        if "claude" in model.lower():
-            # Claude uses similar tokenization to GPT-4
-            encoding = tiktoken.get_encoding("cl100k_base")
-        else:
-            encoding = tiktoken.encoding_for_model(model)
-        
+        encoding = tiktoken.encoding_for_model(model)
         return len(encoding.encode(text))
-        
-    except Exception:
+
+    except (ImportError, KeyError):
         # Rough estimate: ~4 characters per token
         return len(text) // 4
 
 
-def truncate_to_tokens(text: str, max_tokens: int, model: str = "gpt-4") -> str:
+def truncate_to_tokens(text: str, max_tokens: int, model: str = None) -> str:
     """Truncate text to fit within token limit"""
+    model = _resolve_tiktoken_model(model)
     try:
         import tiktoken
-        
-        if "claude" in model.lower():
-            encoding = tiktoken.get_encoding("cl100k_base")
-        else:
-            encoding = tiktoken.encoding_for_model(model)
-        
+        encoding = tiktoken.encoding_for_model(model)
+
         tokens = encoding.encode(text)
         if len(tokens) <= max_tokens:
             return text
-        
+
         truncated_tokens = tokens[:max_tokens]
         return encoding.decode(truncated_tokens)
-        
-    except Exception:
+
+    except (ImportError, KeyError):
         # Rough estimate
         chars_per_token = 4
         max_chars = max_tokens * chars_per_token

@@ -1,0 +1,13 @@
+{% if recent_tasks is defined and recent_tasks|length > 0 %}
+<ul class="activity-list">
+    {% for task in recent_tasks %}
+    <li class="activity-item">
+        <span class="activity-icon">&#10003;</span>
+        <span class="activity-topic">{{ task.topic }}</span>
+        <span class="activity-meta">{{ "{:,}".format(task.word_count) }} words, {{ task.citation_count }} citations</span>
+    </li>
+    {% endfor %}
+</ul>
+{% else %}
+<p class="activity-empty">No completed tasks yet.</p>
+{% endif %}

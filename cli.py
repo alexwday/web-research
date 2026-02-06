@@ -110,7 +110,8 @@ def status():
         f"Session #{session.id}"
     )
     
-    console.print(f"\n[cyan]Query:[/cyan] {session.query[:200]}...")
+    query_display = session.query[:200] + ("..." if len(session.query) > 200 else "")
+    console.print(f"\n[cyan]Query:[/cyan] {query_display}")
     console.print(f"[cyan]Started:[/cyan] {session.started_at}")
     console.print(f"[cyan]Status:[/cyan] {session.status}")
     
@@ -152,7 +153,7 @@ def reset(
 
 @app.command()
 def export(
-    format: str = typer.Option(
+    export_format: str = typer.Option(
         "all",
         "--format", "-f",
         help="Export format: markdown, html, pdf, or all"
@@ -167,25 +168,25 @@ def export(
     Export the current research to different formats.
     """
     from src.compiler import ReportCompiler
-    
+
     db = get_database()
     session = db.get_current_session()
-    
+
     if not session:
         print_error("No research session found to export.")
         raise typer.Exit(1)
-    
+
     config = load_config()
-    
+
     # Override output directory if specified
     if output_dir:
         config.output.directory = output_dir
-    
+
     # Set formats based on option
-    if format == "all":
+    if export_format == "all":
         config.output.formats = ["markdown", "html"]
     else:
-        config.output.formats = [format]
+        config.output.formats = [export_format]
     
     compiler = ReportCompiler()
     
@@ -246,65 +247,39 @@ def validate():
     print_success("\nValidation complete!")
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", "-H", help="Host to bind to"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to bind to"),
+):
+    """Start the web dashboard."""
+    import uvicorn
+    from src.web.app import create_app
+
+    print_info(f"Starting web dashboard at http://{host}:{port}")
+    uvicorn.run(create_app(), host=host, port=port)
+
+
 def _validate_api_keys(settings, verbose: bool = False) -> bool:
     """Validate that required API keys are set"""
-    config = load_config()
     valid = True
-    
-    # Check LLM provider key
-    provider = config.llm.provider.value
-    
-    if provider == "anthropic":
-        if settings.anthropic_api_key:
-            if verbose:
-                print_success("ANTHROPIC_API_KEY is set")
-        else:
-            print_error("ANTHROPIC_API_KEY is not set")
-            valid = False
-            
-    elif provider == "openai":
-        if settings.openai_api_key:
-            if verbose:
-                print_success("OPENAI_API_KEY is set")
-        else:
-            print_error("OPENAI_API_KEY is not set")
-            valid = False
-            
-    elif provider == "openrouter":
-        if settings.openrouter_api_key:
-            if verbose:
-                print_success("OPENROUTER_API_KEY is set")
-        else:
-            print_error("OPENROUTER_API_KEY is not set")
-            valid = False
-    
-    # Check search provider key
-    search_provider = config.search.provider.value
-    
-    if search_provider == "tavily":
-        if settings.tavily_api_key:
-            if verbose:
-                print_success("TAVILY_API_KEY is set")
-        else:
-            print_error("TAVILY_API_KEY is not set")
-            valid = False
-            
-    elif search_provider == "serper":
-        if settings.serper_api_key:
-            if verbose:
-                print_success("SERPER_API_KEY is set")
-        else:
-            print_error("SERPER_API_KEY is not set")
-            valid = False
-            
-    elif search_provider == "brave":
-        if settings.brave_api_key:
-            if verbose:
-                print_success("BRAVE_API_KEY is set")
-        else:
-            print_error("BRAVE_API_KEY is not set")
-            valid = False
-    
+
+    # Check OpenAI key
+    if settings.openai_api_key:
+        if verbose:
+            print_success("OPENAI_API_KEY is set")
+    else:
+        print_error("OPENAI_API_KEY is not set")
+        valid = False
+
+    # Check Tavily key
+    if settings.tavily_api_key:
+        if verbose:
+            print_success("TAVILY_API_KEY is set")
+    else:
+        print_error("TAVILY_API_KEY is not set")
+        valid = False
+
     return valid
 
 

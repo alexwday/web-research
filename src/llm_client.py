@@ -1,18 +1,98 @@
 """
 LLM Client Module for Deep Research Agent
-Supports Anthropic, OpenAI, and OpenRouter
+Uses OpenAI API
 """
-import json
+import threading
 import time
-from typing import Optional, List, Dict, Any, Generator
-from abc import ABC, abstractmethod
+from typing import Optional, List, Dict
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .config import get_config, get_env_settings, LLMProvider
+from .config import get_config, get_env_settings
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# MODEL PRICING (per 1M tokens: input / output USD)
+# =============================================================================
+
+MODEL_PRICING: Dict[str, Dict[str, float]] = {
+    "gpt-4o-mini":   {"input": 0.15,  "output": 0.60},
+    "gpt-4o":        {"input": 2.50,  "output": 10.00},
+    "gpt-4.1-nano":  {"input": 0.10,  "output": 0.40},
+    "gpt-4.1-mini":  {"input": 0.40,  "output": 1.60},
+    "gpt-4.1":       {"input": 2.00,  "output": 8.00},
+    "gpt-5-mini":    {"input": 1.25,  "output": 5.00},
+    "gpt-5.1-mini":  {"input": 0.80,  "output": 3.20},
+    "gpt-5":         {"input": 10.00, "output": 30.00},
+    "gpt-5.1":       {"input": 3.00,  "output": 12.00},
+    "gpt-5.2":       {"input": 10.00, "output": 30.00},
+    "o3-mini":       {"input": 1.10,  "output": 4.40},
+    "o3":            {"input": 10.00, "output": 40.00},
+    "o4-mini":       {"input": 1.10,  "output": 4.40},
+}
+
+
+# =============================================================================
+# TOKEN TRACKER
+# =============================================================================
+
+class TokenTracker:
+    """Thread-safe, in-memory token usage and cost tracker."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_cost = 0.0
+        self._calls = 0
+
+    def record(self, model: str, prompt_tokens: int, completion_tokens: int):
+        cost = self._cost_for_model(model, prompt_tokens, completion_tokens)
+        with self._lock:
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_cost += cost
+            self._calls += 1
+
+    def get_stats(self) -> Dict:
+        with self._lock:
+            return {
+                "prompt_tokens": self._total_prompt_tokens,
+                "completion_tokens": self._total_completion_tokens,
+                "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+                "total_cost": round(self._total_cost, 6),
+                "calls": self._calls,
+            }
+
+    @staticmethod
+    def _cost_for_model(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        # Exact match first
+        pricing = MODEL_PRICING.get(model)
+        # Prefix match for versioned names like gpt-5.2-2025-12-11
+        if pricing is None:
+            for prefix, p in MODEL_PRICING.items():
+                if model.startswith(prefix):
+                    pricing = p
+                    break
+        if pricing is None:
+            return 0.0
+        input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
+        output_cost = (completion_tokens / 1_000_000) * pricing["output"]
+        return input_cost + output_cost
+
+
+_token_tracker: Optional[TokenTracker] = None
+
+
+def get_token_tracker() -> TokenTracker:
+    """Get the singleton TokenTracker instance."""
+    global _token_tracker
+    if _token_tracker is None:
+        _token_tracker = TokenTracker()
+    return _token_tracker
 
 
 # =============================================================================
@@ -21,12 +101,12 @@ logger = get_logger(__name__)
 
 class LLMRateLimiter:
     """Rate limiter for LLM API calls"""
-    
+
     def __init__(self, calls_per_minute: int):
         self.calls_per_minute = calls_per_minute
         self.interval = 60.0 / calls_per_minute
         self.last_call = 0.0
-    
+
     def wait(self):
         """Wait if necessary to respect rate limit"""
         now = time.time()
@@ -48,178 +128,23 @@ def get_llm_limiter() -> LLMRateLimiter:
 
 
 # =============================================================================
-# BASE CLIENT
-# =============================================================================
-
-class BaseLLMClient(ABC):
-    """Abstract base class for LLM clients"""
-    
-    @abstractmethod
-    def complete(
-        self,
-        prompt: str,
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False
-    ) -> str:
-        """Generate a completion"""
-        pass
-    
-    @abstractmethod
-    def complete_with_messages(
-        self,
-        messages: List[Dict[str, str]],
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False
-    ) -> str:
-        """Generate a completion with message history"""
-        pass
-
-
-# =============================================================================
-# ANTHROPIC CLIENT
-# =============================================================================
-
-class AnthropicClient(BaseLLMClient):
-    """Client for Anthropic Claude API"""
-    
-    def __init__(self):
-        settings = get_env_settings()
-        if not settings.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY not set in environment")
-        
-        try:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        except ImportError:
-            raise ImportError("Please install anthropic: pip install anthropic")
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def complete(
-        self,
-        prompt: str,
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False,
-        model: str = None
-    ) -> str:
-        config = get_config()
-        model = model or config.llm.models.researcher
-        
-        # Apply rate limiting
-        get_llm_limiter().wait()
-        
-        logger.debug(f"Anthropic completion with model: {model}")
-        
-        # Build messages
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Modify system prompt for JSON mode
-        if json_mode and system:
-            system = system + "\n\nYou MUST respond with valid JSON only. No other text."
-        elif json_mode:
-            system = "You MUST respond with valid JSON only. No other text."
-        
-        try:
-            response = self.client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system or "You are a helpful research assistant.",
-                messages=messages
-            )
-            
-            content = response.content[0].text
-            
-            # Validate JSON if needed
-            if json_mode:
-                content = self._extract_json(content)
-            
-            return content
-            
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            raise
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def complete_with_messages(
-        self,
-        messages: List[Dict[str, str]],
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False,
-        model: str = None
-    ) -> str:
-        config = get_config()
-        model = model or config.llm.models.researcher
-        
-        # Apply rate limiting
-        get_llm_limiter().wait()
-        
-        # Modify system prompt for JSON mode
-        if json_mode and system:
-            system = system + "\n\nYou MUST respond with valid JSON only. No other text."
-        elif json_mode:
-            system = "You MUST respond with valid JSON only. No other text."
-        
-        try:
-            response = self.client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system or "You are a helpful research assistant.",
-                messages=messages
-            )
-            
-            content = response.content[0].text
-            
-            if json_mode:
-                content = self._extract_json(content)
-            
-            return content
-            
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            raise
-    
-    def _extract_json(self, content: str) -> str:
-        """Extract JSON from response, handling markdown code blocks"""
-        content = content.strip()
-        
-        # Remove markdown code blocks
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        
-        return content.strip()
-
-
-# =============================================================================
 # OPENAI CLIENT
 # =============================================================================
 
-class OpenAIClient(BaseLLMClient):
+class OpenAIClient:
     """Client for OpenAI API"""
-    
+
     def __init__(self):
         settings = get_env_settings()
         if not settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY not set in environment")
-        
+
         try:
             from openai import OpenAI
             self.client = OpenAI(api_key=settings.openai_api_key)
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
-    
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def complete(
         self,
@@ -232,34 +157,49 @@ class OpenAIClient(BaseLLMClient):
     ) -> str:
         config = get_config()
         model = model or config.llm.models.researcher
-        
+
         # Apply rate limiting
         get_llm_limiter().wait()
-        
+
         logger.debug(f"OpenAI completion with model: {model}")
-        
+
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        
+
         kwargs = {
             "model": model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
         }
-        
+
+        # Models that only accept default temperature (reasoning & gpt-5-mini/nano)
+        _no_temp = ("o1", "o3", "o4", "gpt-5-mini", "gpt-5-nano")
+        if not any(model.startswith(p) for p in _no_temp):
+            kwargs["temperature"] = temperature
+
+        # Newer models require max_completion_tokens instead of max_tokens
+        if any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4", "gpt-4.1")):
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        
+
         try:
             response = self.client.chat.completions.create(**kwargs)
+            if response.usage:
+                get_token_tracker().record(
+                    model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise
-    
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def complete_with_messages(
         self,
@@ -272,187 +212,64 @@ class OpenAIClient(BaseLLMClient):
     ) -> str:
         config = get_config()
         model = model or config.llm.models.researcher
-        
+
         # Apply rate limiting
         get_llm_limiter().wait()
-        
+
         full_messages = []
         if system:
             full_messages.append({"role": "system", "content": system})
         full_messages.extend(messages)
-        
+
         kwargs = {
             "model": model,
             "messages": full_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
         }
-        
+
+        _no_temp = ("o1", "o3", "o4", "gpt-5-mini", "gpt-5-nano")
+        if not any(model.startswith(p) for p in _no_temp):
+            kwargs["temperature"] = temperature
+
+        if any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4", "gpt-4.1")):
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        
+
         try:
             response = self.client.chat.completions.create(**kwargs)
+            if response.usage:
+                get_token_tracker().record(
+                    model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise
-
-
-# =============================================================================
-# OPENROUTER CLIENT
-# =============================================================================
-
-class OpenRouterClient(BaseLLMClient):
-    """Client for OpenRouter API"""
-    
-    def __init__(self):
-        settings = get_env_settings()
-        if not settings.openrouter_api_key:
-            raise ValueError("OPENROUTER_API_KEY not set in environment")
-        
-        try:
-            from openai import OpenAI
-            self.client = OpenAI(
-                base_url=settings.openrouter_base_url,
-                api_key=settings.openrouter_api_key
-            )
-        except ImportError:
-            raise ImportError("Please install openai: pip install openai")
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def complete(
-        self,
-        prompt: str,
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False,
-        model: str = None
-    ) -> str:
-        config = get_config()
-        model = model or config.llm.models.researcher
-        
-        # OpenRouter uses different model naming
-        if not "/" in model:
-            model = f"anthropic/{model}"
-        
-        # Apply rate limiting
-        get_llm_limiter().wait()
-        
-        logger.debug(f"OpenRouter completion with model: {model}")
-        
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        
-        try:
-            response = self.client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content
-            
-            if json_mode:
-                content = self._extract_json(content)
-            
-            return content
-        except Exception as e:
-            logger.error(f"OpenRouter API error: {e}")
-            raise
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def complete_with_messages(
-        self,
-        messages: List[Dict[str, str]],
-        system: str = None,
-        max_tokens: int = 4000,
-        temperature: float = 0.3,
-        json_mode: bool = False,
-        model: str = None
-    ) -> str:
-        config = get_config()
-        model = model or config.llm.models.researcher
-        
-        if not "/" in model:
-            model = f"anthropic/{model}"
-        
-        # Apply rate limiting
-        get_llm_limiter().wait()
-        
-        full_messages = []
-        if system:
-            full_messages.append({"role": "system", "content": system})
-        full_messages.extend(messages)
-        
-        kwargs = {
-            "model": model,
-            "messages": full_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        
-        try:
-            response = self.client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content
-            
-            if json_mode:
-                content = self._extract_json(content)
-            
-            return content
-        except Exception as e:
-            logger.error(f"OpenRouter API error: {e}")
-            raise
-    
-    def _extract_json(self, content: str) -> str:
-        """Extract JSON from response"""
-        content = content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        return content.strip()
 
 
 # =============================================================================
 # CLIENT FACTORY
 # =============================================================================
 
-_client: Optional[BaseLLMClient] = None
+_client: Optional[OpenAIClient] = None
+_client_lock = threading.Lock()
 
 
-def get_llm_client() -> BaseLLMClient:
-    """Get the configured LLM client"""
+def get_llm_client() -> OpenAIClient:
+    """Get the OpenAI LLM client"""
     global _client
-    
+
     if _client is None:
-        config = get_config()
-        provider = config.llm.provider
-        
-        logger.info(f"Initializing LLM client: {provider}")
-        
-        if provider == LLMProvider.ANTHROPIC:
-            _client = AnthropicClient()
-        elif provider == LLMProvider.OPENAI:
-            _client = OpenAIClient()
-        elif provider == LLMProvider.OPENROUTER:
-            _client = OpenRouterClient()
-        else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
-    
+        with _client_lock:
+            if _client is None:
+                logger.info("Initializing OpenAI LLM client")
+                _client = OpenAIClient()
+
     return _client
 
 

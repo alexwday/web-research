@@ -1,0 +1,44 @@
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="value">{{ stats.get("total_tasks", 0) }}</div>
+        <div class="label">Total Tasks</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.get("completed_tasks", 0) }}</div>
+        <div class="label">Completed</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.get("pending_tasks", 0) }}</div>
+        <div class="label">Pending</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.get("failed_tasks", 0) }}</div>
+        <div class="label">Failed</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.get("total_sources", 0) }}</div>
+        <div class="label">Sources</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(stats.get("total_words", 0)) }}</div>
+        <div class="label">Words</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ stats.get("glossary_terms", 0) }}</div>
+        <div class="label">Glossary Terms</div>
+    </div>
+    {% if token_stats is defined and token_stats %}
+    <div class="stat-card">
+        <div class="value">{{ "{:,}".format(token_stats.total_tokens) }}</div>
+        <div class="label">Tokens Used</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ token_stats.calls }}</div>
+        <div class="label">LLM Calls</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">${{ "%.4f"|format(token_stats.total_cost) }}</div>
+        <div class="label">Est. Cost</div>
+    </div>
+    {% endif %}
+</div>

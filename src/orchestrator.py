@@ -4,16 +4,14 @@ Coordinates the entire research process
 """
 import time
 import signal
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, List
 
 from .config import get_config, TaskStatus, ResearchTask, GlossaryTerm
-from .database import get_database, DatabaseManager
+from .database import get_database
 from .agents import PlannerAgent, ResearcherAgent, EditorAgent
 from .compiler import ReportCompiler
-from .tools import save_markdown, count_words, count_citations, ensure_directory, generate_file_path
+from .tools import save_markdown, read_file, count_words, count_citations, ensure_directory, generate_file_path
 from .logger import (
     get_logger, console, print_header, print_success, print_error,
     print_warning, print_info, print_task_start, print_write,
@@ -30,23 +28,28 @@ class ResearchOrchestrator:
     Coordinates planning, research, and compilation.
     """
     
-    def __init__(self):
-        self.config = get_config()
+    def __init__(self, register_signals: bool = True):
         self.db = get_database()
         self.planner = PlannerAgent()
         self.researcher = ResearcherAgent()
         self.editor = EditorAgent()
         self.compiler = ReportCompiler()
-        
+
         self.session_id: Optional[int] = None
         self.query: Optional[str] = None
         self.start_time: Optional[datetime] = None
         self.is_running = False
-        
-        # Setup signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
-    
+        self.phase: str = "idle"
+
+        # Setup signal handlers for graceful shutdown (only from main thread)
+        if register_signals:
+            signal.signal(signal.SIGINT, self._handle_shutdown)
+            signal.signal(signal.SIGTERM, self._handle_shutdown)
+
+    @property
+    def config(self):
+        return get_config()
+
     def _handle_shutdown(self, signum, frame):
         """Handle shutdown signals gracefully"""
         print_warning("\nShutdown signal received. Completing current task...")
@@ -74,6 +77,7 @@ class ResearchOrchestrator:
         
         try:
             # Phase 1: Initialize or Resume
+            self.phase = "planning"
             if resume:
                 session = self._resume_session()
                 if not session:
@@ -85,12 +89,15 @@ class ResearchOrchestrator:
             self.session_id = session.id
             
             # Phase 2: Research Loop
+            self.phase = "researching"
             self._run_research_loop()
             
             # Phase 3: Compile Report
+            self.phase = "compiling"
             output_files = self._compile_final_report()
             
             # Phase 4: Cleanup and Statistics
+            self.phase = "complete"
             return self._finalize(output_files)
             
         except KeyboardInterrupt:
@@ -130,8 +137,8 @@ class ResearchOrchestrator:
         if session:
             print_info(f"Resuming session #{session.id}")
             print_info(f"Query: {session.query[:100]}...")
-            
-            stats = self.db.get_statistics()
+
+            stats = self.db.get_statistics(session_id=session.id)
             print_statistics_table(stats)
             
             self.query = session.query
@@ -142,46 +149,60 @@ class ResearchOrchestrator:
     def _run_research_loop(self):
         """Execute the main research loop"""
         print_info("Starting research loop...")
-        
+
         loop_count = 0
-        max_loops = self.config.research.max_loops or float('inf')
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+        max_loops = float('inf') if self.config.research.max_loops < 0 else self.config.research.max_loops
         max_runtime = timedelta(hours=self.config.research.max_runtime_hours) if self.config.research.max_runtime_hours else None
         
         with create_progress_bar() as progress:
             # Create progress task
-            total_tasks = self.db.get_task_count()
+            total_tasks = self.db.get_task_count(session_id=self.session_id)
             task_id = progress.add_task(
                 "[cyan]Researching...",
                 total=total_tasks
             )
-            
+
             while self.is_running:
                 # Check termination conditions
                 if loop_count >= max_loops:
                     print_info(f"Reached maximum loop count ({max_loops})")
                     break
-                
+
                 if max_runtime and (datetime.now() - self.start_time) > max_runtime:
                     print_info(f"Reached maximum runtime ({self.config.research.max_runtime_hours}h)")
                     break
-                
+
                 # Get next task
-                task = self.db.get_next_task()
-                
+                task = self.db.get_next_task(session_id=self.session_id)
+
                 if not task:
                     print_success("All tasks completed!")
                     break
-                
+
                 # Update progress
-                completed = self.db.get_task_count(TaskStatus.COMPLETED)
-                total = self.db.get_task_count()
+                completed = self.db.get_task_count(TaskStatus.COMPLETED, session_id=self.session_id)
+                total = self.db.get_task_count(session_id=self.session_id)
                 progress.update(task_id, completed=completed, total=total)
                 
                 # Execute research
                 print_task_start(task.topic, task.id)
-                
+
+                # Build context: list of all other section topics for the researcher
+                all_tasks = self.db.get_all_tasks(session_id=self.session_id)
+                other_sections = [
+                    f"{t.topic} ({'done' if t.status == 'completed' else 'pending'})"
+                    for t in all_tasks if t.id != task.id
+                ]
+
                 try:
-                    content, new_tasks, glossary_terms = self.researcher.research_task(task)
+                    content, new_tasks, glossary_terms = self.researcher.research_task(
+                        task,
+                        overall_query=self.query or "",
+                        other_sections=other_sections,
+                        session_id=self.session_id
+                    )
                     
                     # Save content to file
                     save_markdown(task.file_path, content, append=False)
@@ -197,33 +218,41 @@ class ResearchOrchestrator:
                     )
                     
                     print_write(task.file_path, word_count)
-                    
+
                     # Handle new tasks from recursion
                     if new_tasks:
                         self._add_recursive_tasks(new_tasks)
-                    
+
                     # Handle glossary terms
                     if glossary_terms:
                         self._add_glossary_terms(glossary_terms, task.id)
-                    
+
                     loop_count += 1
-                    
-                    # Delay between sessions
-                    time.sleep(self.config.research.session_delay)
-                    
+                    consecutive_failures = 0  # reset on success
+
+                    # Delay between tasks
+                    time.sleep(self.config.research.task_delay)
+
                 except Exception as e:
                     logger.error(f"Task {task.id} failed: {e}")
                     self.db.mark_task_failed(task.id, str(e))
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        print_error(
+                            f"Aborting: {consecutive_failures} consecutive "
+                            f"task failures. Last error: {e}"
+                        )
+                        break
                     continue
         
         # Final progress update
-        stats = self.db.get_statistics()
+        stats = self.db.get_statistics(session_id=self.session_id)
         print_statistics_table(stats)
     
     def _add_recursive_tasks(self, new_tasks: List[dict]):
         """Add new tasks discovered during research"""
         # Check if we're at task limit
-        current_count = self.db.get_task_count()
+        current_count = self.db.get_task_count(session_id=self.session_id)
         remaining_capacity = self.config.research.max_total_tasks - current_count
         
         if remaining_capacity <= 0:
@@ -259,34 +288,58 @@ class ResearchOrchestrator:
                 definition=term_data["definition"],
                 first_occurrence_task_id=task_id
             )
-            self.db.add_glossary_term(term)
+            self.db.add_glossary_term(term, session_id=self.session_id)
     
+    def _build_section_summaries(self, tasks) -> tuple:
+        """Build section summaries from completed task files.
+
+        Reads the first ~500 words of each section to give the editor
+        real content to synthesize rather than just topic names.
+
+        Returns (summaries, chapters) where chapters is a list of
+        {"task": task, "content": full_content} dicts for reuse by the compiler.
+        """
+        summaries = []
+        chapters = []
+        for task in tasks:
+            content = read_file(task.file_path)
+            if not content:
+                continue
+            chapters.append({"task": task, "content": content})
+            # Take first ~500 words as a summary
+            words = content.split()
+            summary = " ".join(words[:500])
+            if len(words) > 500:
+                summary += " ..."
+            summaries.append({"topic": task.topic, "summary": summary})
+        return summaries, chapters
+
     def _compile_final_report(self) -> dict:
         """Compile the final report"""
         print_info("Compiling final report...")
-        
-        # Get completed task topics for summary
-        tasks = self.db.get_all_tasks(TaskStatus.COMPLETED)
-        topics = [t.topic for t in tasks]
-        
+
+        # Get completed tasks and build section summaries (also pre-reads files)
+        tasks = self.db.get_all_tasks(TaskStatus.COMPLETED, session_id=self.session_id)
+        section_summaries, pre_read_chapters = self._build_section_summaries(tasks)
+
         # Generate executive summary
         executive_summary = None
         if self.config.output.include_summary:
             try:
                 executive_summary = self.editor.generate_executive_summary(
                     self.query,
-                    topics
+                    section_summaries
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate executive summary: {e}")
-        
+
         # Generate conclusion
         conclusion = None
-        total_words = self.db.get_total_word_count()
+        total_words = self.db.get_total_word_count(session_id=self.session_id)
         try:
             conclusion = self.editor.generate_conclusion(
                 self.query,
-                topics,
+                section_summaries,
                 total_words
             )
         except Exception as e:
@@ -295,14 +348,26 @@ class ResearchOrchestrator:
         # Calculate duration
         duration_seconds = (datetime.now() - self.start_time).total_seconds()
         
-        # Compile report
+        # Compile report (pass pre-read chapters to avoid re-reading files)
         output_files = self.compiler.compile_report(
             self.query,
             executive_summary,
             conclusion,
-            duration_seconds
+            duration_seconds,
+            session_id=self.session_id,
+            pre_read_chapters=pre_read_chapters
         )
-        
+
+        # Store report artifacts on session
+        if self.session_id:
+            self.db.update_session(
+                self.session_id,
+                executive_summary=executive_summary,
+                conclusion=conclusion,
+                report_markdown_path=output_files.get("markdown"),
+                report_html_path=output_files.get("html"),
+            )
+
         return output_files
     
     def _emergency_compile(self) -> dict:
@@ -316,7 +381,8 @@ class ResearchOrchestrator:
                 self.query or "Interrupted Research",
                 None,  # No executive summary
                 None,  # No conclusion
-                duration_seconds
+                duration_seconds,
+                session_id=self.session_id
             )
             
             return self._finalize(output_files)
@@ -327,14 +393,20 @@ class ResearchOrchestrator:
     
     def _finalize(self, output_files: dict) -> dict:
         """Finalize the research session"""
-        
-        # Update session as completed
-        if self.session_id:
-            self.db.complete_session(self.session_id)
-        
+
         # Calculate final statistics
         duration_seconds = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
-        stats = self.db.get_statistics()
+        stats = self.db.get_statistics(session_id=self.session_id)
+
+        # Update session with final stats and mark completed
+        if self.session_id:
+            self.db.update_session(
+                self.session_id,
+                completed_tasks=stats["completed_tasks"],
+                total_words=stats["total_words"],
+                total_sources=stats["total_sources"],
+            )
+            self.db.complete_session(self.session_id)
         
         # Print completion summary
         print_completion_summary(

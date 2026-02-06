@@ -29,11 +29,11 @@ ENV/
 # Project specific
 research.db
 *.db
-research.db-wal
-research.db-shm
+*.db-wal
+*.db-shm
 report/
+research_output/
 logs/
-templates/
 *.log
 
 # Output files

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Deep Research Agent{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+    {% set sq = "?session=" ~ session_id|string if session_id is defined and session_id else "" %}
+    <nav class="topbar">
+        <span class="brand">Deep Research Agent</span>
+        <a href="/dashboard{{ sq }}" class="{% if page == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/tasks{{ sq }}" class="{% if page == 'tasks' %}active{% endif %}">Tasks</a>
+        <a href="/sources{{ sq }}" class="{% if page == 'sources' %}active{% endif %}">Sources</a>
+        <a href="/report{{ sq }}" class="{% if page == 'report' %}active{% endif %}">Report</a>
+        <a href="/sessions" class="{% if page == 'sessions' %}active{% endif %}">Sessions</a>
+        <span
+            id="global-status"
+            hx-get="/fragments/status-badge"
+            hx-trigger="every 5s"
+            hx-swap="innerHTML"
+        >
+            {% if running is defined and running %}
+                <span class="status-badge running">Running</span>
+            {% else %}
+                <span class="status-badge idle">Idle</span>
+            {% endif %}
+        </span>
+    </nav>
+
+    {% if session is defined and session %}
+    <div class="session-banner">
+        <span class="session-banner-query">Session #{{ session.id }}: {{ session.query[:120] }}{% if session.query|length > 120 %}...{% endif %}</span>
+        <span class="badge badge-{{ session.status }}">{{ session.status }}</span>
+        <a href="/sessions" class="session-banner-switch">Switch Session</a>
+    </div>
+    {% endif %}
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
