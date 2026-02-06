@@ -48,7 +48,7 @@ def _build_pricing_map() -> Dict[str, Dict[str, float]]:
     try:
         settings = get_env_settings()
         config = get_config()
-        for role in ("planner", "researcher", "writer", "editor"):
+        for role in ("planner", "researcher", "writer", "editor", "discovery"):
             model_name = getattr(config.llm.models, role)
             input_cost = getattr(settings, f"{role}_model_input_cost")
             output_cost = getattr(settings, f"{role}_model_output_cost")

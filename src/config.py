@@ -107,6 +107,7 @@ class LLMModelsConfig(BaseModel):
     researcher: str = "gpt-4o-mini"
     writer: str = "gpt-4o"
     editor: str = "gpt-4o"
+    discovery: str = "gpt-4o"
 
 
 class LLMMaxTokensConfig(BaseModel):
@@ -114,6 +115,7 @@ class LLMMaxTokensConfig(BaseModel):
     researcher: int = 4000
     writer: int = 6000
     editor: int = 8000
+    discovery: int = 4000
 
 
 class LLMTemperatureConfig(BaseModel):
@@ -121,6 +123,7 @@ class LLMTemperatureConfig(BaseModel):
     researcher: float = 0.2
     writer: float = 0.4
     editor: float = 0.2
+    discovery: float = 0.2
 
 
 class LLMConfig(BaseModel):
@@ -141,6 +144,16 @@ class ScrapingConfig(BaseModel):
     max_content_length: int = 15000
     timeout: int = 15
     rotate_user_agents: bool = True
+
+
+class DiscoveryConfig(BaseModel):
+    enabled: bool = True
+    frequency: int = 3  # run discovery every N completed tasks
+    max_suggestions_per_run: int = 3
+
+
+class RewriteConfig(BaseModel):
+    enabled: bool = True
 
 
 class ResearchConfig(BaseModel):
@@ -195,6 +208,8 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
+    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    rewrite: RewriteConfig = Field(default_factory=RewriteConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     rate_limits: RateLimitsConfig = Field(default_factory=RateLimitsConfig)
@@ -234,6 +249,10 @@ class Settings(BaseSettings):
     editor_model_name: Optional[str] = Field(default=None, alias="EDITOR_MODEL_NAME")
     editor_model_input_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_INPUT_COST")
     editor_model_output_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_OUTPUT_COST")
+
+    discovery_model_name: Optional[str] = Field(default=None, alias="DISCOVERY_MODEL_NAME")
+    discovery_model_input_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_INPUT_COST")
+    discovery_model_output_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_OUTPUT_COST")
 
     class Config:
         env_file = ".env"
@@ -300,6 +319,8 @@ def _apply_env_model_overrides(config: Config) -> None:
         config.llm.models.writer = settings.writer_model_name
     if settings.editor_model_name:
         config.llm.models.editor = settings.editor_model_name
+    if settings.discovery_model_name:
+        config.llm.models.discovery = settings.discovery_model_name
 
 
 def get_env_settings() -> Settings:
@@ -371,6 +392,8 @@ RESEARCH_PRESETS = {
             "research.max_loops": 5,
             "search.queries_per_task": 1,
             "search.max_results": 3,
+            "discovery.enabled": False,
+            "rewrite.enabled": False,
         },
     },
     "standard": {
@@ -388,6 +411,10 @@ RESEARCH_PRESETS = {
             "research.max_loops": 15,
             "search.queries_per_task": 2,
             "search.max_results": 5,
+            "discovery.enabled": True,
+            "discovery.frequency": 5,
+            "discovery.max_suggestions_per_run": 2,
+            "rewrite.enabled": True,
         },
     },
     "deep": {
@@ -405,6 +432,10 @@ RESEARCH_PRESETS = {
             "research.max_loops": 30,
             "search.queries_per_task": 3,
             "search.max_results": 8,
+            "discovery.enabled": True,
+            "discovery.frequency": 3,
+            "discovery.max_suggestions_per_run": 3,
+            "rewrite.enabled": True,
         },
     },
     "exhaustive": {
@@ -422,6 +453,10 @@ RESEARCH_PRESETS = {
             "research.max_loops": 50,
             "search.queries_per_task": 4,
             "search.max_results": 10,
+            "discovery.enabled": True,
+            "discovery.frequency": 2,
+            "discovery.max_suggestions_per_run": 5,
+            "rewrite.enabled": True,
         },
     },
 }

@@ -9,7 +9,7 @@ from typing import Optional, List
 
 from .config import get_config, TaskStatus, ResearchTask, GlossaryTerm
 from .database import get_database
-from .agents import PlannerAgent, ResearcherAgent, EditorAgent
+from .agents import PlannerAgent, ResearcherAgent, DiscoveryAgent, EditorAgent
 from .compiler import ReportCompiler
 from .tools import save_markdown, read_file, count_words, count_citations, ensure_directory, generate_file_path
 from .logger import (
@@ -32,6 +32,7 @@ class ResearchOrchestrator:
         self.db = get_database()
         self.planner = PlannerAgent()
         self.researcher = ResearcherAgent()
+        self.discovery = DiscoveryAgent()
         self.editor = EditorAgent()
         self.compiler = ReportCompiler()
 
@@ -230,6 +231,13 @@ class ResearchOrchestrator:
                     loop_count += 1
                     consecutive_failures = 0  # reset on success
 
+                    # Discovery step: run after every N completed tasks
+                    if (
+                        self.config.discovery.enabled
+                        and loop_count % self.config.discovery.frequency == 0
+                    ):
+                        self._run_discovery()
+
                     # Delay between tasks
                     time.sleep(self.config.research.task_delay)
 
@@ -290,6 +298,47 @@ class ResearchOrchestrator:
             )
             self.db.add_glossary_term(term, session_id=self.session_id)
     
+    def _run_discovery(self):
+        """Run the discovery agent to identify research gaps."""
+        print_info("Running discovery agent for gap analysis...")
+
+        all_tasks = self.db.get_all_tasks(session_id=self.session_id)
+        completed_tasks = [t for t in all_tasks if t.status == "completed"]
+
+        if not completed_tasks:
+            return
+
+        # Build task list for discovery agent
+        task_list = [
+            {"topic": t.topic, "status": t.status}
+            for t in all_tasks
+        ]
+
+        # Build summaries from completed sections
+        section_summaries = []
+        for t in completed_tasks:
+            content = read_file(t.file_path)
+            if not content:
+                continue
+            words = content.split()
+            summary = " ".join(words[:300])
+            if len(words) > 300:
+                summary += " ..."
+            section_summaries.append({"topic": t.topic, "summary": summary})
+
+        new_tasks = self.discovery.discover_tasks(
+            query=self.query or "",
+            all_tasks=task_list,
+            section_summaries=section_summaries,
+            session_id=self.session_id
+        )
+
+        if new_tasks:
+            self._add_recursive_tasks(new_tasks)
+            print_info(f"Discovery agent suggested {len(new_tasks)} new tasks")
+        else:
+            print_info("Discovery agent found no significant gaps")
+
     def _build_section_summaries(self, tasks) -> tuple:
         """Build section summaries from completed task files.
 
@@ -314,6 +363,86 @@ class ResearchOrchestrator:
             summaries.append({"topic": task.topic, "summary": summary})
         return summaries, chapters
 
+    def _rewrite_sections(self, chapters: list) -> tuple:
+        """Reorder and rewrite sections for cohesion.
+
+        Returns (rewritten_chapters, new_section_summaries).
+        """
+        print_info("Running editor rewrite pass...")
+
+        # Step 1: Determine optimal section order
+        topics = [ch["task"].topic for ch in chapters]
+        ordered_topics = self.editor.determine_section_order(
+            self.query or "", topics
+        )
+
+        # Reorder chapters to match
+        topic_to_chapter = {ch["task"].topic: ch for ch in chapters}
+        ordered_chapters = []
+        for topic in ordered_topics:
+            if topic in topic_to_chapter:
+                ordered_chapters.append(topic_to_chapter[topic])
+        # Append any chapters not in the ordered list (safety)
+        seen = set(ordered_topics)
+        for ch in chapters:
+            if ch["task"].topic not in seen:
+                ordered_chapters.append(ch)
+
+        print_info(f"Sections reordered: {len(ordered_chapters)} sections")
+
+        # Step 2: Rewrite each section with awareness of neighbors
+        toc = [ch["task"].topic for ch in ordered_chapters]
+        rewritten_chapters = []
+        preceding_summaries = []
+
+        for i, chapter in enumerate(ordered_chapters):
+            following_topics = toc[i + 1:]
+
+            rewritten_content = self.editor.rewrite_section(
+                query=self.query or "",
+                section_topic=chapter["task"].topic,
+                section_content=chapter["content"],
+                toc=toc,
+                preceding_summaries=preceding_summaries,
+                following_topics=following_topics,
+            )
+
+            rewritten_chapters.append({
+                "task": chapter["task"],
+                "content": rewritten_content,
+            })
+
+            # Save rewritten content to file
+            save_markdown(chapter["task"].file_path, rewritten_content, append=False)
+
+            # Build summary of this section for the next iteration
+            words = rewritten_content.split()
+            summary = " ".join(words[:500])
+            if len(words) > 500:
+                summary += " ..."
+            preceding_summaries.append({
+                "topic": chapter["task"].topic,
+                "summary": summary,
+            })
+
+            print_write(chapter["task"].file_path, count_words(rewritten_content))
+
+        print_info("Editor rewrite pass complete")
+
+        # Rebuild section_summaries from rewritten content
+        section_summaries = []
+        for ch in rewritten_chapters:
+            words = ch["content"].split()
+            summary = " ".join(words[:500])
+            if len(words) > 500:
+                summary += " ..."
+            section_summaries.append({
+                "topic": ch["task"].topic,
+                "summary": summary,
+            })
+
+        return rewritten_chapters, section_summaries
+
     def _compile_final_report(self) -> dict:
         """Compile the final report"""
         print_info("Compiling final report...")
@@ -321,6 +450,12 @@ class ResearchOrchestrator:
         # Get completed tasks and build section summaries (also pre-reads files)
         tasks = self.db.get_all_tasks(TaskStatus.COMPLETED, session_id=self.session_id)
         section_summaries, pre_read_chapters = self._build_section_summaries(tasks)
+
+        # Editor rewrite pass: reorder and rewrite sections for cohesion
+        if self.config.rewrite.enabled and len(pre_read_chapters) > 1:
+            pre_read_chapters, section_summaries = self._rewrite_sections(
+                pre_read_chapters
+            )
 
         # Generate executive summary
         executive_summary = None

@@ -138,6 +138,86 @@ Requirements:
 - Professional academic prose; no bullet lists"""
 
 
+DISCOVERY_SYSTEM_PROMPT = """You are a Research Gap Analyst. Your sole job is to review completed research sections against the original query and identify critical gaps that deserve their own dedicated section.
+
+You will receive:
+- The original research query
+- The full list of existing tasks (completed and pending)
+- Summaries of completed sections
+
+Your task:
+1. Compare what has been written against what a comprehensive report on this topic SHOULD cover
+2. Identify important sub-topics, perspectives, or angles that are missing
+3. Do NOT suggest topics that overlap with existing or pending tasks
+4. Do NOT suggest meta-tasks (e.g. "Write introduction") — only research topics
+5. Prioritize gaps that would significantly improve report comprehensiveness
+
+OUTPUT FORMAT:
+Output ONLY a valid JSON object:
+{{
+  "suggestions": [
+    {{
+      "topic": "Brief title (max 100 chars)",
+      "description": "2-3 sentences explaining what to investigate and why it matters",
+      "priority": 3
+    }}
+  ]
+}}
+
+If no significant gaps exist, return: {{"suggestions": []}}
+
+Priority guidelines:
+- 7-8: Critical gap — report is incomplete without this
+- 5-6: Important — adds significant value
+- 3-4: Nice to have — deepens coverage but not essential"""
+
+
+REORDER_SYSTEM_PROMPT = """You are a Report Structure Editor. Your job is to determine the optimal reading order for the sections of a research report.
+
+Rules:
+- Introduction/Overview/Background sections should come FIRST
+- Core concepts and definitions should come early
+- Main body content should flow logically from general to specific
+- Case studies and applications should come after the concepts they illustrate
+- Comparative analysis and alternative perspectives should come after the things they compare
+- Conclusion/Future Directions/Synthesis sections should come LAST
+- Adjacent sections should have natural thematic connections
+
+OUTPUT FORMAT:
+Output ONLY a valid JSON object with an "order" array containing the section topics in optimal reading order:
+{{
+  "order": [
+    "First Section Topic",
+    "Second Section Topic",
+    ...
+  ]
+}}
+
+Include ALL sections — do not drop any."""
+
+
+REWRITE_SYSTEM_PROMPT = """You are a Report Editor performing a cohesion rewrite pass. You are rewriting ONE section of a larger research report to improve flow, reduce repetition, and strengthen transitions.
+
+You will receive:
+- The full table of contents (so you know the report structure)
+- Summaries of the sections that come BEFORE this one
+- The topics of sections that come AFTER this one
+- The original content of THIS section
+
+Your task:
+1. Rewrite this section so it reads naturally in context:
+   - Remove content that repeats what prior sections already covered (reference them instead: "As discussed in the section on X...")
+   - Add brief forward references where helpful ("This will be explored further in the section on Y")
+   - Ensure terminology is consistent with prior sections
+   - Smooth the opening so it transitions naturally from the previous section
+2. Preserve ALL substantive content, facts, data, and citations — do not remove information, only restructure and rephrase
+3. Keep all [N] citation references exactly as they are — do not renumber or remove them
+4. Maintain the same markdown heading structure (### and ####)
+5. Keep approximately the same length — this is a cohesion edit, not a summary
+
+OUTPUT: The rewritten section content in Markdown format. Do NOT include the section title (## heading) — only the body content."""
+
+
 QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Generate maximally diverse search queries — each must target a different angle or source type."""
 
 
@@ -696,6 +776,132 @@ If you discover important sub-topics that need separate investigation, include t
 
 
 # =============================================================================
+# DISCOVERY AGENT
+# =============================================================================
+
+class DiscoveryAgent:
+    """Agent responsible for identifying research gaps after sections are written"""
+
+    def __init__(self):
+        self.client = get_llm_client()
+        self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
+
+    def discover_tasks(
+        self,
+        query: str,
+        all_tasks: List[Dict[str, str]],
+        section_summaries: List[Dict[str, str]],
+        session_id: int = None
+    ) -> List[Dict]:
+        """
+        Review completed work and identify gaps in coverage.
+
+        Args:
+            query: Original research query
+            all_tasks: List of dicts with 'topic', 'status' keys
+            section_summaries: List of dicts with 'topic', 'summary' keys
+            session_id: Current session ID
+
+        Returns:
+            List of new task dicts with 'topic', 'description', 'priority' keys
+        """
+        logger.info("Running discovery agent for gap analysis...")
+
+        # Build task list context
+        tasks_text = "\n".join(
+            f"- [{t['status']}] {t['topic']}" for t in all_tasks
+        )
+
+        # Build section summaries context
+        summaries_text = "\n\n".join(
+            f"### {s['topic']}\n{s['summary']}" for s in section_summaries
+        )
+
+        prompt = f"""Analyze the following research project for gaps in coverage.
+
+## Original Research Query
+{query}
+
+## All Tasks (completed and pending)
+{tasks_text}
+
+## Summaries of Completed Sections
+{summaries_text}
+
+---
+
+Identify up to {self.config.discovery.max_suggestions_per_run} important topics that are missing and would significantly improve the report's comprehensiveness. Only suggest topics that do NOT overlap with existing tasks."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=DISCOVERY_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.discovery,
+                temperature=self.config.llm.temperature.discovery,
+                json_mode=True,
+                model=self.config.llm.models.discovery
+            )
+
+            return self._parse_discovery_response(response, all_tasks, session_id)
+
+        except Exception as e:
+            logger.warning(f"Discovery agent failed: {e}")
+            return []
+
+    def _parse_discovery_response(
+        self,
+        response: str,
+        all_tasks: List[Dict[str, str]],
+        session_id: int = None
+    ) -> List[Dict]:
+        """Parse discovery agent JSON response into task dicts."""
+        try:
+            data = json.loads(response)
+            suggestions = data.get("suggestions", [])
+        except json.JSONDecodeError:
+            logger.warning("Discovery agent returned invalid JSON")
+            return []
+
+        # Check task limit
+        total_tasks = self.db.get_task_count(session_id=session_id)
+        remaining_capacity = self.config.research.max_total_tasks - total_tasks
+        if remaining_capacity <= 0:
+            return []
+
+        existing_topics = [t['topic'].lower() for t in all_tasks]
+        new_tasks = []
+
+        for suggestion in suggestions[:self.config.discovery.max_suggestions_per_run]:
+            if not isinstance(suggestion, dict) or "topic" not in suggestion:
+                continue
+
+            topic = suggestion["topic"]
+            # Deduplication check
+            is_duplicate = any(
+                topic.lower() in et or et in topic.lower()
+                for et in existing_topics
+            )
+            if is_duplicate:
+                continue
+
+            new_tasks.append({
+                "topic": topic,
+                "description": suggestion.get("description", ""),
+                "priority": min(suggestion.get("priority", 5), 8),
+                "depth": 1,
+            })
+
+            if len(new_tasks) >= remaining_capacity:
+                break
+
+        return new_tasks
+
+
+# =============================================================================
 # EDITOR AGENT
 # =============================================================================
 
@@ -774,3 +980,129 @@ Write a 400-600 word conclusion that synthesizes findings across sections, ident
         )
 
         return response
+
+    def determine_section_order(self, query: str, section_topics: List[str]) -> List[str]:
+        """Determine the optimal reading order for report sections.
+
+        Args:
+            query: The original research query
+            section_topics: List of section topic strings
+
+        Returns:
+            Ordered list of section topics
+        """
+        logger.info("Determining optimal section order...")
+
+        topics_text = "\n".join(f"- {t}" for t in section_topics)
+
+        prompt = f"""Determine the optimal reading order for these sections of a research report.
+
+Research Query: {query}
+
+Sections (in current arbitrary order):
+{topics_text}
+
+Reorder them for the best logical flow and reading experience."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=REORDER_SYSTEM_PROMPT,
+                max_tokens=2000,
+                temperature=0.1,
+                json_mode=True,
+                model=self.config.llm.models.editor
+            )
+
+            data = json.loads(response)
+            ordered = data.get("order", [])
+
+            # Validate: every original topic must appear exactly once
+            original_set = set(section_topics)
+            ordered_set = set(ordered)
+
+            if ordered_set == original_set:
+                return ordered
+
+            # Fallback: use returned order for known topics, append missing ones
+            logger.warning("Reorder response missing/extra topics; patching...")
+            result = [t for t in ordered if t in original_set]
+            for t in section_topics:
+                if t not in ordered_set:
+                    result.append(t)
+            return result
+
+        except Exception as e:
+            logger.warning(f"Section reorder failed: {e}; keeping original order")
+            return section_topics
+
+    def rewrite_section(
+        self,
+        query: str,
+        section_topic: str,
+        section_content: str,
+        toc: List[str],
+        preceding_summaries: List[Dict[str, str]],
+        following_topics: List[str]
+    ) -> str:
+        """Rewrite a single section for cohesion within the full report.
+
+        Args:
+            query: Original research query
+            section_topic: This section's topic
+            section_content: Original markdown content of this section
+            toc: Full ordered table of contents (topic strings)
+            preceding_summaries: Summaries of sections before this one
+            following_topics: Topics of sections after this one
+
+        Returns:
+            Rewritten section content (markdown, no ## heading)
+        """
+        logger.info(f"Rewriting section: {section_topic}")
+
+        toc_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(toc))
+
+        preceding_text = ""
+        if preceding_summaries:
+            preceding_text = "\n\n".join(
+                f"### {s['topic']}\n{s['summary']}" for s in preceding_summaries
+            )
+
+        following_text = ""
+        if following_topics:
+            following_text = "\n".join(f"- {t}" for t in following_topics)
+
+        prompt = f"""Rewrite this section for cohesion within the full report.
+
+## Research Query
+{query}
+
+## Full Table of Contents
+{toc_text}
+
+## Preceding Section Summaries
+{preceding_text if preceding_text else "(This is the first section)"}
+
+## Sections After This One
+{following_text if following_text else "(This is the last section)"}
+
+## Section to Rewrite: {section_topic}
+
+{section_content}
+
+---
+
+Rewrite the above section content. Preserve all facts, data, and citations. Improve transitions and reduce repetition with preceding sections."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=REWRITE_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.editor,
+                temperature=self.config.llm.temperature.editor,
+                model=self.config.llm.models.editor
+            )
+            return response
+        except Exception as e:
+            logger.warning(f"Rewrite failed for '{section_topic}': {e}; keeping original")
+            return section_content
