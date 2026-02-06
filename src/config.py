@@ -218,6 +218,23 @@ class Settings(BaseSettings):
     oauth_client_secret: Optional[str] = Field(default=None, alias="CLIENT_SECRET")
     azure_base_url: Optional[str] = Field(default=None, alias="AZURE_BASE_URL")
 
+    # Per-agent model name & pricing (override config.yaml when set)
+    planner_model_name: Optional[str] = Field(default=None, alias="PLANNER_MODEL_NAME")
+    planner_model_input_cost: Optional[float] = Field(default=None, alias="PLANNER_MODEL_INPUT_COST")
+    planner_model_output_cost: Optional[float] = Field(default=None, alias="PLANNER_MODEL_OUTPUT_COST")
+
+    researcher_model_name: Optional[str] = Field(default=None, alias="RESEARCHER_MODEL_NAME")
+    researcher_model_input_cost: Optional[float] = Field(default=None, alias="RESEARCHER_MODEL_INPUT_COST")
+    researcher_model_output_cost: Optional[float] = Field(default=None, alias="RESEARCHER_MODEL_OUTPUT_COST")
+
+    writer_model_name: Optional[str] = Field(default=None, alias="WRITER_MODEL_NAME")
+    writer_model_input_cost: Optional[float] = Field(default=None, alias="WRITER_MODEL_INPUT_COST")
+    writer_model_output_cost: Optional[float] = Field(default=None, alias="WRITER_MODEL_OUTPUT_COST")
+
+    editor_model_name: Optional[str] = Field(default=None, alias="EDITOR_MODEL_NAME")
+    editor_model_input_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_INPUT_COST")
+    editor_model_output_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_OUTPUT_COST")
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -262,13 +279,27 @@ _settings_lock = threading.Lock()
 
 
 def get_config() -> Config:
-    """Get global config instance"""
+    """Get global config instance, with env var overrides for model names."""
     global _config
     if _config is None:
         with _config_lock:
             if _config is None:
                 _config = load_config()
+                _apply_env_model_overrides(_config)
     return _config
+
+
+def _apply_env_model_overrides(config: Config) -> None:
+    """Override config.yaml model names with env vars when set."""
+    settings = get_env_settings()
+    if settings.planner_model_name:
+        config.llm.models.planner = settings.planner_model_name
+    if settings.researcher_model_name:
+        config.llm.models.researcher = settings.researcher_model_name
+    if settings.writer_model_name:
+        config.llm.models.writer = settings.writer_model_name
+    if settings.editor_model_name:
+        config.llm.models.editor = settings.editor_model_name
 
 
 def get_env_settings() -> Settings:

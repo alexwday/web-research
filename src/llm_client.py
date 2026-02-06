@@ -42,6 +42,26 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
 # TOKEN TRACKER
 # =============================================================================
 
+def _build_pricing_map() -> Dict[str, Dict[str, float]]:
+    """Build model→pricing map from env vars, falling back to hardcoded defaults."""
+    pricing = dict(MODEL_PRICING)
+    try:
+        settings = get_env_settings()
+        config = get_config()
+        for role in ("planner", "researcher", "writer", "editor"):
+            model_name = getattr(config.llm.models, role)
+            input_cost = getattr(settings, f"{role}_model_input_cost")
+            output_cost = getattr(settings, f"{role}_model_output_cost")
+            if input_cost is not None or output_cost is not None:
+                pricing[model_name] = {
+                    "input": input_cost or 0.0,
+                    "output": output_cost or 0.0,
+                }
+    except Exception:
+        pass
+    return pricing
+
+
 class TokenTracker:
     """Thread-safe, in-memory token usage and cost tracker."""
 
@@ -51,6 +71,12 @@ class TokenTracker:
         self._total_completion_tokens = 0
         self._total_cost = 0.0
         self._calls = 0
+        self._pricing: Optional[Dict[str, Dict[str, float]]] = None
+
+    def _get_pricing(self) -> Dict[str, Dict[str, float]]:
+        if self._pricing is None:
+            self._pricing = _build_pricing_map()
+        return self._pricing
 
     def record(self, model: str, prompt_tokens: int, completion_tokens: int):
         cost = self._cost_for_model(model, prompt_tokens, completion_tokens)
@@ -70,13 +96,13 @@ class TokenTracker:
                 "calls": self._calls,
             }
 
-    @staticmethod
-    def _cost_for_model(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    def _cost_for_model(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        pricing_map = self._get_pricing()
         # Exact match first
-        pricing = MODEL_PRICING.get(model)
+        pricing = pricing_map.get(model)
         # Prefix match for versioned names like gpt-5.2-2025-12-11
         if pricing is None:
-            for prefix, p in MODEL_PRICING.items():
+            for prefix, p in pricing_map.items():
                 if model.startswith(prefix):
                     pricing = p
                     break
