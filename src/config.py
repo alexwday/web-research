@@ -48,7 +48,8 @@ class ResearchTask(BaseModel):
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
-    
+    retry_count: int = 0
+
     class Config:
         use_enum_values = True
 

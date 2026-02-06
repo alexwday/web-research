@@ -20,6 +20,22 @@ from .logger import get_logger
 
 logger = get_logger(__name__)
 
+
+def strip_image_data(text: str) -> str:
+    """Remove base64 data URIs and other embedded image/binary noise from text.
+
+    OpenAI rejects prompts that contain data-URI images.  This strips them
+    out so scraped web content can safely be sent to the LLM.
+    """
+    # data:image/...;base64,<long blob>  (greedy across whitespace)
+    text = re.sub(r'data:image/[^;]{1,20};base64,[A-Za-z0-9+/=\s]{20,}', '[image removed]', text)
+    # data:application/octet-stream or other binary data URIs
+    text = re.sub(r'data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{100,}', '[binary data removed]', text)
+    # Stray long base64 blobs that aren't wrapped in a data URI (>200 chars of pure b64)
+    text = re.sub(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{200,}={0,3}(?![A-Za-z0-9+/=])', '[blob removed]', text)
+    return text
+
+
 # User agents for rotation
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -279,6 +295,7 @@ def scrape_url(url: str) -> Tuple[str, str]:
                 no_fallback=False
             )
             if content and len(content) > 200:
+                content = strip_image_data(content)
                 # Get title separately
                 soup = BeautifulSoup(response.content, 'html.parser')
                 title = (soup.title.string or "") if soup.title else ""
@@ -297,8 +314,9 @@ def scrape_url(url: str) -> Tuple[str, str]:
             title = soup.title.string or ""
         
         # Remove unwanted elements
-        for element in soup(['script', 'style', 'nav', 'footer', 'header', 
-                           'aside', 'form', 'button', 'iframe', 'noscript']):
+        for element in soup(['script', 'style', 'nav', 'footer', 'header',
+                           'aside', 'form', 'button', 'iframe', 'noscript',
+                           'img', 'svg', 'picture', 'video', 'audio', 'canvas']):
             element.decompose()
         
         # Try to find main content
@@ -318,7 +336,8 @@ def scrape_url(url: str) -> Tuple[str, str]:
         # Clean up text
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         text = '\n'.join(lines)
-        
+        text = strip_image_data(text)
+
         # Truncate if needed
         text = text[:config.scraping.max_content_length]
         
@@ -343,7 +362,7 @@ def extract_source_info(url: str, search_result: Dict[str, Any] = None) -> Sourc
     # Try to use raw_content from Tavily search results (already fetched)
     full_content = ""
     if search_result and search_result.get('raw_content'):
-        full_content = search_result['raw_content']
+        full_content = strip_image_data(search_result['raw_content'])
         logger.debug(f"Using Tavily raw_content for {url[:50]}...")
     else:
         # Fall back to scraping if no raw_content available

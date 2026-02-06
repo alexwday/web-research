@@ -51,7 +51,8 @@ class TaskModel(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
-    
+    retry_count = Column(Integer, default=0)
+
     # Relationships
     children = relationship("TaskModel", backref=backref("parent", remote_side="TaskModel.id"), foreign_keys=[parent_id])
     sources = relationship("SourceModel", secondary=task_source_association, back_populates="tasks")
@@ -71,7 +72,8 @@ class TaskModel(Base):
             citation_count=self.citation_count,
             created_at=self.created_at,
             completed_at=self.completed_at,
-            error_message=self.error_message
+            error_message=self.error_message,
+            retry_count=self.retry_count or 0
         )
 
 
@@ -223,6 +225,7 @@ class DatabaseManager:
         self._migrate_session_columns()
         self._migrate_glossary_columns()
         self._migrate_association_columns()
+        self._migrate_task_columns()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -261,6 +264,17 @@ class DatabaseManager:
             if "position" not in existing:
                 conn.execute(text(
                     "ALTER TABLE task_source_association ADD COLUMN position INTEGER DEFAULT 0"
+                ))
+                conn.commit()
+
+    def _migrate_task_columns(self):
+        """Add retry_count column to tasks table for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "retry_count" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0"
                 ))
                 conn.commit()
 
@@ -423,13 +437,32 @@ class DatabaseManager:
         )
     
     def mark_task_failed(self, task_id: int, error_message: str):
-        """Mark a task as failed"""
-        self.update_task(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            error_message=error_message
-        )
-    
+        """Mark a task as failed and increment retry_count."""
+        with self.get_sync_session() as session:
+            task = session.query(TaskModel).filter(TaskModel.id == task_id).first()
+            if task:
+                task.status = TaskStatus.FAILED.value
+                task.error_message = error_message
+                task.retry_count = (task.retry_count or 0) + 1
+                session.commit()
+
+    def retry_failed_tasks(self, session_id: int, max_retries: int = 2) -> int:
+        """Reset retryable FAILED tasks back to PENDING.
+
+        Returns the number of tasks reset.
+        """
+        with self.get_sync_session() as session:
+            tasks = session.query(TaskModel).filter(
+                TaskModel.status == TaskStatus.FAILED.value,
+                TaskModel.session_id == session_id,
+                (TaskModel.retry_count == None) | (TaskModel.retry_count < max_retries),  # noqa: E711
+            ).all()
+            for task in tasks:
+                task.status = TaskStatus.PENDING.value
+                task.error_message = None
+            session.commit()
+            return len(tasks)
+
     def get_task_count(self, status: TaskStatus = None, session_id: int = None) -> int:
         """Get count of tasks"""
         with self.get_sync_session() as session:

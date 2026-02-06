@@ -238,10 +238,15 @@ class ResearchOrchestrator:
                                 active[future] = task
 
                     if not active:
-                        # No running tasks and none to claim — we're done
+                        # No running tasks and none to claim — check for retryable failures
+                        retried = self.db.retry_failed_tasks(self.session_id, max_retries=2)
+                        if retried > 0:
+                            print_info(f"Retrying {retried} previously failed task(s)...")
+                            continue
+
                         failed = self.db.get_task_count(TaskStatus.FAILED, session_id=self.session_id)
                         if failed > 0:
-                            print_warning(f"No pending tasks remain; {failed} task(s) failed.")
+                            print_warning(f"No pending tasks remain; {failed} task(s) failed after retries.")
                         else:
                             print_success("All tasks completed!")
                         break
