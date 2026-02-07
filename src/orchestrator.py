@@ -115,7 +115,7 @@ class ResearchOrchestrator:
                 # Phase 1: Deep Pre-Planning
                 self.phase = "pre_planning"
                 print_info("Phase 1: Deep pre-planning...")
-                pre_plan_ctx = self.planner.run_pre_planning(query, self.session_id)
+                pre_plan_ctx = self.planner.run_pre_planning(self.query, self.session_id)
 
                 if not self.is_running:
                     return self._emergency_compile()
@@ -123,7 +123,7 @@ class ResearchOrchestrator:
                 # Phase 2: Report Outline
                 self.phase = "outline_design"
                 print_info("Phase 2: Designing report outline...")
-                sections = self.outline_designer.design_outline(query, pre_plan_ctx, self.session_id)
+                sections = self.outline_designer.design_outline(self.query, pre_plan_ctx, self.session_id)
                 print_success(f"Designed outline with {len(sections)} sections")
 
                 if not self.is_running:
@@ -141,7 +141,7 @@ class ResearchOrchestrator:
                         logger.warning(f"Reached max_total_tasks ({max_total}), skipping remaining sections")
                         break
                     tasks = self.section_planner.plan_tasks_for_section(
-                        section, sections, query, self.session_id,
+                        section, sections, self.query, self.session_id,
                         task_budget=max_total - total_created,
                     )
                     total_created += len(tasks)
@@ -170,7 +170,7 @@ class ResearchOrchestrator:
             print_info("Phase 5: Gap analysis...")
             # Reload sections in case they were modified
             sections = self.db.get_all_sections(session_id=self.session_id)
-            gap_result = self.gap_analyst.analyze_gaps(query, sections, self.session_id)
+            gap_result = self.gap_analyst.analyze_gaps(self.query, sections, self.session_id)
             if gap_result.get("new_tasks", 0) > 0:
                 print_info(f"Gap analysis created {gap_result['new_tasks']} new tasks, "
                           f"{gap_result.get('new_sections', 0)} new sections")
@@ -186,7 +186,7 @@ class ResearchOrchestrator:
             self.phase = "synthesizing"
             print_info("Phase 6: Synthesizing sections...")
             sections = self.db.get_all_sections(session_id=self.session_id)
-            self._synthesize_all_sections(query, sections)
+            self._synthesize_all_sections(self.query, sections)
 
             # Phase 7: Compile
             self.phase = "compiling"
