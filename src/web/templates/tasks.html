@@ -41,4 +41,30 @@
     <p>Start a research session from the <a href="/dashboard">Dashboard</a>.</p>
 </div>
 {% endif %}
+
+<script>
+const _expandedTasks = new Set();
+
+function toggleTaskQueries(id) {
+    const row = document.getElementById('task-queries-' + id);
+    if (!row) return;
+    if (row.style.display === 'none') {
+        row.style.display = '';
+        _expandedTasks.add(id);
+    } else {
+        row.style.display = 'none';
+        _expandedTasks.delete(id);
+    }
+}
+
+// Preserve expanded state across HTMX polls
+document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target.id === 'task-table-body') {
+        _expandedTasks.forEach(function(id) {
+            var row = document.getElementById('task-queries-' + id);
+            if (row) row.style.display = '';
+        });
+    }
+});
+</script>
 {% endblock %}

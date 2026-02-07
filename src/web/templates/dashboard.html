@@ -1,165 +1,289 @@
 {% extends "base.html" %}
 {% block title %}Dashboard – Deep Research Agent{% endblock %}
+{% block container_class %}dashboard-container{% endblock %}
 
 {% block content %}
 {% set sp = "&session=" ~ session_id|string if session_id else "" %}
 {% set sq = "?session=" ~ session_id|string if session_id else "" %}
-<h1 class="page-title">Dashboard</h1>
 
-<!-- Start / Stop research -->
-{% if running %}
-<form class="research-form" hx-post="/api/research/stop" hx-swap="none"
-      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 500)">
-    <input type="text" value="{{ session.query if session else '' }}" disabled>
-    <button class="btn btn-danger" type="submit">Stop Research</button>
-</form>
-{% else %}
-<form id="start-form">
-    <!-- Query row: [input] [Start Research] [Refine Query] -->
-    <div class="research-form">
-        <input type="text" name="query"
-               placeholder="Enter your research query..." required>
-        {% if refinement_enabled %}
-        <button class="btn btn-ghost" type="button" id="btn-start-direct">Start Research</button>
-        <button class="btn btn-primary" type="button" id="btn-refine">Refine Query</button>
+<div class="dashboard-three-col">
+    <aside class="dashboard-sidebar dashboard-sidebar-left" id="sessions-sidebar">
+        <div class="dashboard-sidebar-card sessions-sidebar-card">
+            <div class="dashboard-sidebar-header">
+                <h2 class="dashboard-sidebar-title">Sessions</h2>
+                <span class="sidebar-count">{{ session_rows|length }}</span>
+            </div>
+
+            {% if session_rows %}
+            <ul class="sessions-sidebar-list">
+                {% for row in session_rows %}
+                {% set s = row.session %}
+                {% set st = row.stats %}
+                <li class="session-sidebar-item {% if session and s.id == session.id %}active{% endif %}">
+                    <a class="session-sidebar-link" href="/dashboard?session={{ s.id }}">
+                        <div class="session-sidebar-title">#{{ s.id }} · {{ s.query[:72] }}{% if s.query|length > 72 %}...{% endif %}</div>
+                        <div class="session-sidebar-meta">
+                            <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
+                            <span>{{ st.completed_tasks }}/{{ st.total_tasks }} tasks</span>
+                            <span>{{ "{:,}".format(st.total_words) }} words</span>
+                            <span>{{ st.total_sources }} sources</span>
+                        </div>
+                        <div class="session-sidebar-submeta">
+                            {{ s.started_at.strftime('%Y-%m-%d %H:%M') if s.started_at else '-' }}
+                        </div>
+                    </a>
+                    <div class="session-sidebar-actions">
+                        <a href="/dashboard?session={{ s.id }}" class="btn btn-sm btn-outline">Open</a>
+                        {% if s.report_html_path %}
+                        <a href="/report?session={{ s.id }}" class="btn btn-sm btn-primary">Report</a>
+                        {% endif %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="activity-empty">No sessions yet.</p>
+            {% endif %}
+        </div>
+    </aside>
+
+    <main class="dashboard-main">
+        <h1 class="page-title">Dashboard</h1>
+
+        <!-- Start / Stop research -->
+        {% if running %}
+        <form class="research-form" hx-post="/api/research/stop" hx-swap="none"
+              hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 500)">
+            <input type="text" value="{{ session.query if session else '' }}" disabled>
+            <button class="btn btn-danger" type="submit">Stop Research</button>
+        </form>
         {% else %}
-        <button class="btn btn-primary" type="button" id="btn-start-direct">Start Research</button>
+        <form id="start-form">
+            <input type="hidden" name="preset" id="preset-input" value="quick">
+
+            <!-- Preset selector + advanced settings (above query input) -->
+            <div class="start-config-block">
+                <div class="advanced-section" id="advanced-settings">
+                    <div class="preset-controls-row">
+                        <div class="preset-selector">
+                            <div class="preset-buttons">
+                                <button type="button" class="preset-btn active" data-preset="quick"
+                                        onclick="selectPreset('quick')">
+                                    <span class="preset-name">Quick</span>
+                                </button>
+                                <button type="button" class="preset-btn" data-preset="standard"
+                                        onclick="selectPreset('standard')">
+                                    <span class="preset-name">Standard</span>
+                                </button>
+                                <button type="button" class="preset-btn" data-preset="deep"
+                                        onclick="selectPreset('deep')">
+                                    <span class="preset-name">Deep</span>
+                                </button>
+                                <button type="button" class="preset-btn" data-preset="exhaustive"
+                                        onclick="selectPreset('exhaustive')">
+                                    <span class="preset-name">Exhaustive</span>
+                                </button>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            class="advanced-toggle-btn"
+                            id="advanced-toggle-btn"
+                            aria-expanded="false"
+                            aria-controls="advanced-settings-panel"
+                        >
+                            Advanced Settings
+                        </button>
+                    </div>
+
+                    <div class="advanced-panel" id="advanced-settings-panel" hidden>
+                        <div class="advanced-grid">
+                        <!-- Task Limits -->
+                        <div class="advanced-group">
+                            <h4>Task Limits</h4>
+                            <div class="field">
+                                <label for="f-min-tasks">Min Initial Tasks</label>
+                                <input type="number" id="f-min-tasks" name="research.min_initial_tasks" min="1" max="100">
+                            </div>
+                            <div class="field">
+                                <label for="f-max-tasks">Max Total Tasks</label>
+                                <input type="number" id="f-max-tasks" name="research.max_total_tasks" min="1" max="200">
+                            </div>
+                            <div class="field">
+                                <label for="f-max-loops">Max Loops</label>
+                                <input type="number" id="f-max-loops" name="research.max_loops" min="-1" max="200">
+                                <span class="field-hint">-1 = unlimited</span>
+                            </div>
+                            <div class="field">
+                                <label for="f-max-runtime">Max Runtime (hours)</label>
+                                <input type="number" id="f-max-runtime" name="research.max_runtime_hours" min="1" max="168">
+                            </div>
+                        </div>
+
+                        <!-- Content Quality -->
+                        <div class="advanced-group">
+                            <h4>Content Quality</h4>
+                            <div class="field">
+                                <label for="f-min-words">Min Words / Section</label>
+                                <input type="number" id="f-min-words" name="research.min_words_per_section" min="50" max="10000">
+                            </div>
+                            <div class="field">
+                                <label for="f-max-words">Max Words / Section</label>
+                                <input type="number" id="f-max-words" name="research.max_words_per_section" min="100" max="10000">
+                            </div>
+                            <div class="field">
+                                <label for="f-min-citations">Min Citations / Section</label>
+                                <input type="number" id="f-min-citations" name="research.min_citations_per_section" min="0" max="20">
+                            </div>
+                        </div>
+
+                        <!-- Search -->
+                        <div class="advanced-group">
+                            <h4>Search</h4>
+                            <div class="field">
+                                <label for="f-queries-per-task">Queries per Task</label>
+                                <input type="number" id="f-queries-per-task" name="search.queries_per_task" min="1" max="10">
+                            </div>
+                            <div class="field">
+                                <label for="f-max-results">Max Results</label>
+                                <input type="number" id="f-max-results" name="search.max_results" min="1" max="20">
+                            </div>
+                        </div>
+
+                        <!-- Recursion -->
+                        <div class="advanced-group">
+                            <h4>Recursion</h4>
+                            <div class="field field-checkbox">
+                                <input type="hidden" name="research.enable_recursion" value="false">
+                                <label>
+                                    <input type="checkbox" id="f-enable-recursion" name="research.enable_recursion" value="true">
+                                    Enable Recursion
+                                </label>
+                            </div>
+                            <div class="field">
+                                <label for="f-max-recursion">Max Recursion Depth</label>
+                                <input type="number" id="f-max-recursion" name="research.max_recursion_depth" min="0" max="5">
+                            </div>
+                        </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Query row: [input] [Start Research] [Refine Query] -->
+            <div class="research-form">
+                <input type="text" name="query"
+                       placeholder="Enter your research query..." required>
+                {% if refinement_enabled %}
+                <button class="btn btn-ghost" type="button" id="btn-start-direct">Start Research</button>
+                <button class="btn btn-primary" type="button" id="btn-refine">Refine Query</button>
+                {% else %}
+                <button class="btn btn-primary" type="button" id="btn-start-direct">Start Research</button>
+                {% endif %}
+            </div>
+
+            <!-- Inline refinement container (hidden initially) -->
+            {% if refinement_enabled %}
+            <div id="refine-inline" style="display:none">
+                <!-- Loading spinner -->
+                <div id="refine-loading" class="refine-inline-loading" style="display:none">
+                    <span class="refine-spinner"></span> Generating refinement questions...
+                </div>
+
+                <!-- Questions tabs -->
+                <div id="refine-questions" style="display:none">
+                    <div class="refine-tab-bar" id="refine-tab-bar"></div>
+                    <div id="refine-tab-content" class="refine-tab-content"></div>
+                    <div class="refine-inline-actions">
+                        <a href="#" class="refine-skip-link" id="refine-skip-link">Skip, start immediately</a>
+                    </div>
+                </div>
+
+                <!-- Brief review (inline) -->
+                <div id="refine-brief-review" style="display:none">
+                    <div class="refine-brief-section">
+                        <label for="inline-brief-textarea"><strong>Enhanced Research Brief</strong> (editable):</label>
+                        <textarea id="inline-brief-textarea" class="refine-brief-textarea" rows="10"></textarea>
+                    </div>
+                    <div class="refine-inline-actions">
+                        <button type="button" class="btn btn-primary" id="btn-start-with-brief">Start Research</button>
+                        <a href="#" class="refine-skip-link" id="brief-back-link">Back to Questions</a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </form>
         {% endif %}
-    </div>
 
-    <!-- Inline refinement container (hidden initially) -->
-    {% if refinement_enabled %}
-    <div id="refine-inline" style="display:none">
-        <!-- Loading spinner -->
-        <div id="refine-loading" class="refine-inline-loading" style="display:none">
-            <span class="refine-spinner"></span> Generating refinement questions...
-        </div>
+        <!-- Session info -->
+        {% if session %}
+        {% set session_status = session.status if session.status else "unknown" %}
+        <div class="session-info">
+            <div class="session-info-grid">
+                <div class="session-info-item session-info-item-wide">
+                    <div class="session-info-label">Query</div>
+                    <p class="session-info-value session-info-value-text">
+                        {{ session.query[:200] }}{% if session.query|length > 200 %}...{% endif %}
+                    </p>
+                </div>
 
-        <!-- Questions tabs -->
-        <div id="refine-questions" style="display:none">
-            <div class="refine-tab-bar" id="refine-tab-bar"></div>
-            <div id="refine-tab-content" class="refine-tab-content"></div>
-            <div class="refine-inline-actions">
-                <a href="#" class="refine-skip-link" id="refine-skip-link">Skip, start immediately</a>
-            </div>
-        </div>
+                {% if session.refined_brief %}
+                <div class="session-info-item session-info-item-wide">
+                    <div class="session-info-label">Refined Brief</div>
+                    <p class="session-info-value session-info-value-text">
+                        {{ session.refined_brief[:300] }}{% if session.refined_brief|length > 300 %}...{% endif %}
+                    </p>
+                    {% if session.refined_brief|length > 300 %}
+                    <details class="session-brief-details">
+                        <summary class="session-brief-summary">Show full refined brief</summary>
+                        <p class="session-info-value session-info-value-text session-brief-full">
+                            {{ session.refined_brief }}
+                        </p>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endif %}
 
-        <!-- Brief review (inline) -->
-        <div id="refine-brief-review" style="display:none">
-            <div class="refine-brief-section">
-                <label for="inline-brief-textarea"><strong>Enhanced Research Brief</strong> (editable):</label>
-                <textarea id="inline-brief-textarea" class="refine-brief-textarea" rows="10"></textarea>
-            </div>
-            <div class="refine-inline-actions">
-                <button type="button" class="btn btn-primary" id="btn-start-with-brief">Start Research</button>
-                <a href="#" class="refine-skip-link" id="brief-back-link">Back to Questions</a>
-            </div>
-        </div>
-    </div>
-    {% endif %}
+                <div class="session-info-item">
+                    <div class="session-info-label">Started</div>
+                    <p class="session-info-value">
+                        {{ session.started_at.strftime('%Y-%m-%d %H:%M') if session.started_at else "-" }}
+                    </p>
+                </div>
 
-    <!-- Preset selector -->
-    <input type="hidden" name="preset" id="preset-input" value="quick">
-    <div class="preset-selector">
-        <div class="preset-buttons">
-            <button type="button" class="preset-btn active" data-preset="quick"
-                    onclick="selectPreset('quick')">
-                <span class="preset-name">Quick</span>
-                <span class="preset-desc">3–5 tasks, fast overview</span>
-            </button>
-            <button type="button" class="preset-btn" data-preset="standard"
-                    onclick="selectPreset('standard')">
-                <span class="preset-name">Standard</span>
-                <span class="preset-desc">8–15 tasks, balanced</span>
-            </button>
-            <button type="button" class="preset-btn" data-preset="deep"
-                    onclick="selectPreset('deep')">
-                <span class="preset-name">Deep</span>
-                <span class="preset-desc">15–30 tasks, thorough</span>
-            </button>
-            <button type="button" class="preset-btn" data-preset="exhaustive"
-                    onclick="selectPreset('exhaustive')">
-                <span class="preset-name">Exhaustive</span>
-                <span class="preset-desc">30–50 tasks, maximum depth</span>
-            </button>
-        </div>
-    </div>
-
-    <!-- Advanced settings -->
-    <details class="advanced-section">
-        <summary class="advanced-toggle">Advanced Settings</summary>
-        <div class="advanced-grid">
-            <!-- Task Limits -->
-            <div class="advanced-group">
-                <h4>Task Limits</h4>
-                <div class="field">
-                    <label for="f-min-tasks">Min Initial Tasks</label>
-                    <input type="number" id="f-min-tasks" name="research.min_initial_tasks" min="1" max="100">
-                </div>
-                <div class="field">
-                    <label for="f-max-tasks">Max Total Tasks</label>
-                    <input type="number" id="f-max-tasks" name="research.max_total_tasks" min="1" max="200">
-                </div>
-                <div class="field">
-                    <label for="f-max-loops">Max Loops</label>
-                    <input type="number" id="f-max-loops" name="research.max_loops" min="-1" max="200">
-                    <span class="field-hint">-1 = unlimited</span>
-                </div>
-                <div class="field">
-                    <label for="f-max-runtime">Max Runtime (hours)</label>
-                    <input type="number" id="f-max-runtime" name="research.max_runtime_hours" min="1" max="168">
-                </div>
-            </div>
-
-            <!-- Content Quality -->
-            <div class="advanced-group">
-                <h4>Content Quality</h4>
-                <div class="field">
-                    <label for="f-min-words">Min Words / Section</label>
-                    <input type="number" id="f-min-words" name="research.min_words_per_section" min="50" max="10000">
-                </div>
-                <div class="field">
-                    <label for="f-max-words">Max Words / Section</label>
-                    <input type="number" id="f-max-words" name="research.max_words_per_section" min="100" max="10000">
-                </div>
-                <div class="field">
-                    <label for="f-min-citations">Min Citations / Section</label>
-                    <input type="number" id="f-min-citations" name="research.min_citations_per_section" min="0" max="20">
-                </div>
-            </div>
-
-            <!-- Search -->
-            <div class="advanced-group">
-                <h4>Search</h4>
-                <div class="field">
-                    <label for="f-queries-per-task">Queries per Task</label>
-                    <input type="number" id="f-queries-per-task" name="search.queries_per_task" min="1" max="10">
-                </div>
-                <div class="field">
-                    <label for="f-max-results">Max Results</label>
-                    <input type="number" id="f-max-results" name="search.max_results" min="1" max="20">
-                </div>
-            </div>
-
-            <!-- Recursion -->
-            <div class="advanced-group">
-                <h4>Recursion</h4>
-                <div class="field field-checkbox">
-                    <input type="hidden" name="research.enable_recursion" value="false">
-                    <label>
-                        <input type="checkbox" id="f-enable-recursion" name="research.enable_recursion" value="true">
-                        Enable Recursion
-                    </label>
-                </div>
-                <div class="field">
-                    <label for="f-max-recursion">Max Recursion Depth</label>
-                    <input type="number" id="f-max-recursion" name="research.max_recursion_depth" min="0" max="5">
+                <div class="session-info-item">
+                    <div class="session-info-label">Status</div>
+                    <p class="session-info-value">
+                        <span class="session-status-pill session-status-{{ session_status }}">
+                            {{ session_status|replace("_", " ")|title }}
+                        </span>
+                    </p>
                 </div>
             </div>
         </div>
-    </details>
-</form>
-{% endif %}
+        {% endif %}
+
+        <!-- Stats grid (polled) -->
+        <div id="stats-area"
+             hx-get="/fragments/stats{{ sq }}"
+             hx-trigger="every 5s"
+             hx-swap="innerHTML">
+            {% include "fragments/stats.html" %}
+        </div>
+    </main>
+
+    <aside class="dashboard-sidebar dashboard-sidebar-right">
+        <div class="dashboard-sidebar-card">
+            <h2 class="dashboard-sidebar-title">Activity Log</h2>
+            <div id="activity-log-area"
+                 hx-get="/fragments/search-activity{{ sq }}"
+                 hx-trigger="every 3s"
+                 hx-swap="innerHTML">
+                {% include "fragments/search_activity.html" %}
+            </div>
+        </div>
+    </aside>
+</div>
 
 <script>
 var PRESETS = {
@@ -218,13 +342,16 @@ var PRESETS = {
 };
 
 function selectPreset(name) {
+    var form = document.getElementById('start-form');
+    if (!form) return;
+
     document.getElementById('preset-input').value = name;
     document.querySelectorAll('.preset-btn').forEach(function(btn) {
         btn.classList.toggle('active', btn.dataset.preset === name);
     });
     var values = PRESETS[name];
     if (!values) return;
-    var form = document.getElementById('start-form');
+
     for (var key in values) {
         var el = form.querySelector('input[name="' + key + '"][type="checkbox"]');
         if (el) { el.checked = !!values[key]; continue; }
@@ -233,23 +360,95 @@ function selectPreset(name) {
     }
 }
 
-// ── Helpers ──
 function _getFormData() {
     var form = document.getElementById('start-form');
     return new FormData(form);
 }
 
-function _startDirect() {
+function _setQueryRowDisabled(disabled) {
     var form = document.getElementById('start-form');
-    var query = form.querySelector('input[name="query"]').value.trim();
-    if (!query) { form.querySelector('input[name="query"]').focus(); return; }
-    var fd = _getFormData();
-    fetch('/api/research/start', { method: 'POST', body: fd })
-        .then(function() { setTimeout(function(){ window.location.reload(); }, 1000); })
-        .catch(function(err) { alert('Failed to start: ' + err); });
+    if (!form) return;
+    var queryInput = form.querySelector('input[name="query"]');
+    var btnStart = document.getElementById('btn-start-direct');
+    var btnRefine = document.getElementById('btn-refine');
+    if (queryInput) queryInput.disabled = disabled;
+    if (btnStart) btnStart.disabled = disabled;
+    if (btnRefine) btnRefine.disabled = disabled;
 }
 
-// ── Inline refinement state ──
+function _setConfigControlsDisabled(disabled) {
+    var form = document.getElementById('start-form');
+    if (!form) return;
+
+    var presetSelector = form.querySelector('.preset-selector');
+    if (presetSelector) {
+        presetSelector.classList.toggle('is-disabled', disabled);
+    }
+
+    form.querySelectorAll('.preset-btn').forEach(function(btn) {
+        btn.disabled = disabled;
+    });
+
+    var advancedSection = form.querySelector('.advanced-section');
+    var advancedToggleBtn = form.querySelector('#advanced-toggle-btn');
+    var advancedPanel = form.querySelector('#advanced-settings-panel');
+
+    if (advancedToggleBtn) {
+        advancedToggleBtn.disabled = disabled;
+        advancedToggleBtn.classList.toggle('is-disabled', disabled);
+    }
+
+    if (disabled && advancedPanel && !advancedPanel.hidden) {
+        advancedPanel.dataset.wasOpen = '1';
+        advancedPanel.hidden = true;
+        if (advancedToggleBtn) advancedToggleBtn.setAttribute('aria-expanded', 'false');
+    }
+
+    if (!disabled && advancedPanel && advancedPanel.dataset.wasOpen === '1') {
+        advancedPanel.hidden = false;
+        if (advancedToggleBtn) advancedToggleBtn.setAttribute('aria-expanded', 'true');
+        delete advancedPanel.dataset.wasOpen;
+    }
+
+    if (advancedSection) {
+        advancedSection.classList.toggle('is-disabled', disabled);
+    }
+    if (advancedPanel) {
+        advancedPanel.classList.toggle('is-disabled', disabled);
+    }
+}
+
+function _setStartFormDisabled(disabled) {
+    _setQueryRowDisabled(disabled);
+    _setConfigControlsDisabled(disabled);
+}
+
+function _startDirect() {
+    var form = document.getElementById('start-form');
+    var queryInput = form.querySelector('input[name="query"]');
+
+    var wasDisabled = queryInput.disabled;
+    queryInput.disabled = false;
+    var query = queryInput.value.trim();
+    if (!query) {
+        queryInput.focus();
+        queryInput.disabled = wasDisabled;
+        return;
+    }
+
+    var fd = _getFormData();
+    queryInput.disabled = wasDisabled;
+
+    _setStartFormDisabled(true);
+
+    fetch('/api/research/start', { method: 'POST', body: fd })
+        .then(function() { setTimeout(function(){ window.location.reload(); }, 1000); })
+        .catch(function(err) {
+            _setStartFormDisabled(false);
+            alert('Failed to start: ' + err);
+        });
+}
+
 var _refineToken = null;
 var _refineQuestions = [];
 var _refineAnswers = [];
@@ -261,7 +460,6 @@ function _showTab(idx) {
     var content = document.getElementById('refine-tab-content');
     if (!_refineQuestions.length) return;
 
-    // Update tab bar
     bar.querySelectorAll('.refine-tab').forEach(function(t, i) {
         t.classList.toggle('active', i === idx);
     });
@@ -282,7 +480,6 @@ function _showTab(idx) {
     html += '<div class="refine-custom-input"><label class="refine-option"><input type="radio" name="rq_' + idx + '" value=""' + customChecked + '><span>Other:</span></label>';
     html += '<input type="text" class="refine-custom-text" placeholder="Type your own answer..." value="' + _escAttr(customVal) + '"></div>';
     html += '</div>';
-    // Next button (for custom text or reviewing)
     html += '<div class="refine-next-row"><button type="button" class="btn btn-sm btn-ghost" id="btn-next-q">Next &rarr;</button></div>';
     html += '</div>';
     content.innerHTML = html;
@@ -290,12 +487,10 @@ function _showTab(idx) {
     function _advanceFromCustom() {
         var ci = content.querySelector('.refine-custom-text');
         var val = ci ? ci.value.trim() : '';
-        // If "Other" radio is selected, use custom text
         var otherRadio = content.querySelector('.refine-custom-input input[type="radio"]');
         if (otherRadio && otherRadio.checked && val) {
             _refineAnswers[idx] = val;
         }
-        // Only advance if this question has an answer
         if (!_refineAnswers[idx]) return;
         _updateTabs();
         if (idx < _refineQuestions.length - 1) {
@@ -303,7 +498,6 @@ function _showTab(idx) {
         }
     }
 
-    // Bind radio option events
     content.querySelectorAll('input[type="radio"]').forEach(function(r) {
         r.addEventListener('change', function() {
             var val = this.value;
@@ -317,7 +511,6 @@ function _showTab(idx) {
         });
     });
 
-    // Custom text input
     var customInput = content.querySelector('.refine-custom-text');
     if (customInput) {
         customInput.addEventListener('focus', function() {
@@ -332,7 +525,6 @@ function _showTab(idx) {
         });
     }
 
-    // Next button
     var nextBtn = document.getElementById('btn-next-q');
     if (nextBtn) {
         nextBtn.addEventListener('click', _advanceFromCustom);
@@ -349,7 +541,6 @@ function _updateTabs() {
             check.textContent = '';
         }
     });
-    // Auto-start refined research when all questions answered
     var allAnswered = _refineAnswers.every(function(a) { return !!a; });
     if (allAnswered && !_refineAutoStarted) {
         _refineAutoStarted = true;
@@ -364,7 +555,6 @@ function _startRefinedResearch() {
         return { question: q.question, answer: _refineAnswers[i] || '' };
     });
 
-    // Show generating state
     var questionsDiv = document.getElementById('refine-questions');
     var loadingDiv = document.getElementById('refine-loading');
     questionsDiv.style.display = 'none';
@@ -379,7 +569,6 @@ function _startRefinedResearch() {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        // Show brief for review before final start
         loadingDiv.style.display = 'none';
         document.getElementById('inline-brief-textarea').value = data.brief || '';
         document.getElementById('refine-brief-review').style.display = '';
@@ -417,11 +606,20 @@ document.addEventListener('DOMContentLoaded', function() {
         selectPreset('quick');
     }
 
-    // "Start Research" (skip refinement)
+    var advancedToggleBtn = document.getElementById('advanced-toggle-btn');
+    if (advancedToggleBtn) {
+        advancedToggleBtn.addEventListener('click', function() {
+            var panel = document.getElementById('advanced-settings-panel');
+            if (!panel) return;
+            var isOpen = !panel.hidden;
+            panel.hidden = isOpen;
+            this.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+        });
+    }
+
     var btnStart = document.getElementById('btn-start-direct');
     if (btnStart) btnStart.addEventListener('click', _startDirect);
 
-    // "Refine Query" button
     var btnRefine = document.getElementById('btn-refine');
     if (btnRefine) {
         btnRefine.addEventListener('click', function() {
@@ -435,9 +633,8 @@ document.addEventListener('DOMContentLoaded', function() {
             loading.style.display = '';
             document.getElementById('refine-questions').style.display = 'none';
             document.getElementById('refine-brief-review').style.display = 'none';
-            btnRefine.disabled = true;
+            _setStartFormDisabled(true);
 
-            // Build JSON body with form data
             var body = { query: query, preset: document.getElementById('preset-input').value };
             form.querySelectorAll('input[name]').forEach(function(el) {
                 if (el.name.indexOf('.') !== -1) {
@@ -454,7 +651,6 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 loading.style.display = 'none';
-                btnRefine.disabled = false;
                 _refineToken = data.token;
                 _refineQuestions = data.questions || [];
                 _refineAnswers = new Array(_refineQuestions.length).fill('');
@@ -464,13 +660,13 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(function(err) {
                 loading.style.display = 'none';
-                btnRefine.disabled = false;
+                _setStartFormDisabled(false);
+                container.style.display = 'none';
                 alert('Refinement failed: ' + err);
             });
         });
     }
 
-    // "Start Research" with brief
     var btnStartBrief = document.getElementById('btn-start-with-brief');
     if (btnStartBrief) {
         btnStartBrief.addEventListener('click', function() {
@@ -484,13 +680,11 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // "Skip, start immediately" link in questions view
     var skipLink = document.getElementById('refine-skip-link');
     if (skipLink) {
         skipLink.addEventListener('click', function(e) { e.preventDefault(); _startDirect(); });
     }
 
-    // "Back to Questions" link in brief view
     var backLink = document.getElementById('brief-back-link');
     if (backLink) {
         backLink.addEventListener('click', function(e) {
@@ -501,39 +695,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
-
-<!-- Session info -->
-{% if session %}
-<div class="session-info">
-    <strong>Query:</strong> {{ session.query[:200] }}{% if session.query|length > 200 %}...{% endif %}<br>
-    {% if session.refined_brief %}
-    <strong>Refined Brief:</strong> {{ session.refined_brief[:300] }}{% if session.refined_brief|length > 300 %}...{% endif %}<br>
-    {% endif %}
-    <strong>Started:</strong> {{ session.started_at }}<br>
-    <strong>Status:</strong> {{ session.status }}
-</div>
-{% endif %}
-
-<!-- Stats grid (polled) -->
-<div id="stats-area"
-     hx-get="/fragments/stats{{ sq }}"
-     hx-trigger="every 5s"
-     hx-swap="innerHTML">
-    {% include "fragments/stats.html" %}
-</div>
-
-<!-- Unified activity log (polled) -->
-{% if session %}
-<div class="activity-section">
-    <h3 class="activity-heading">Activity Log</h3>
-    <div id="activity-log-area"
-         hx-get="/fragments/search-activity{{ sq }}"
-         hx-trigger="every 3s"
-         hx-swap="innerHTML">
-        {% include "fragments/search_activity.html" %}
-    </div>
-</div>
-{% endif %}
 
 <!-- Client-side elapsed timer (ticks between HTMX polls) -->
 <script>

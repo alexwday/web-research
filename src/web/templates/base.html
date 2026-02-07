@@ -15,7 +15,6 @@
         <a href="/tasks{{ sq }}" class="{% if page == 'tasks' %}active{% endif %}">Tasks</a>
         <a href="/sources{{ sq }}" class="{% if page == 'sources' %}active{% endif %}">Sources</a>
         <a href="/report{{ sq }}" class="{% if page == 'report' %}active{% endif %}">Report</a>
-        <a href="/sessions" class="{% if page == 'sessions' %}active{% endif %}">Sessions</a>
         <span
             id="global-status"
             hx-get="/fragments/status-badge"
@@ -34,12 +33,89 @@
     <div class="session-banner">
         <span class="session-banner-query">Session #{{ session.id }}: {{ session.query[:120] }}{% if session.query|length > 120 %}...{% endif %}</span>
         <span class="badge badge-{{ session.status }}">{{ session.status }}</span>
-        <a href="/sessions" class="session-banner-switch">Switch Session</a>
+        <a href="/dashboard{{ sq }}#sessions-sidebar" class="session-banner-switch">Switch Session</a>
     </div>
     {% endif %}
 
-    <div class="container">
+    <div class="container {% block container_class %}{% endblock %}">
         {% block content %}{% endblock %}
     </div>
+
+    <script>
+    /* ── Preserve scroll positions & <details> open state across HTMX polls ── */
+    (function() {
+        var _savedState = {};
+
+        function _getScrollables(root) {
+            var els = [];
+            root.querySelectorAll('.feed-list, .report-sidebar, .source-raw-content, [style*="overflow"]').forEach(function(el) {
+                els.push(el);
+            });
+            if (root.scrollTop > 0) els.push(root);
+            return els;
+        }
+
+        function _key(el, idx) {
+            return (el.id || el.className || '') + ':' + idx;
+        }
+
+        document.body.addEventListener('htmx:beforeSwap', function(e) {
+            var target = e.detail.target;
+            if (!target || !target.id) return;
+            var state = { scrolls: [], details: [] };
+
+            // Save scroll positions of all scrollable children
+            var scrollables = _getScrollables(target);
+            scrollables.forEach(function(el, i) {
+                if (el.scrollTop > 0 || el.scrollLeft > 0) {
+                    state.scrolls.push({ key: _key(el, i), top: el.scrollTop, left: el.scrollLeft, cls: el.className });
+                }
+            });
+
+            // Save <details> open state
+            target.querySelectorAll('details').forEach(function(d) {
+                if (d.open) {
+                    state.details.push(d.id || d.querySelector('summary').textContent.trim());
+                }
+            });
+
+            _savedState[target.id] = state;
+        });
+
+        document.body.addEventListener('htmx:afterSwap', function(e) {
+            var target = e.detail.target;
+            if (!target || !target.id) return;
+            var state = _savedState[target.id];
+            if (!state) return;
+
+            // Restore scroll positions
+            if (state.scrolls.length) {
+                var scrollables = _getScrollables(target);
+                state.scrolls.forEach(function(saved) {
+                    // Match by class name similarity
+                    for (var i = 0; i < scrollables.length; i++) {
+                        if (scrollables[i].className === saved.cls) {
+                            scrollables[i].scrollTop = saved.top;
+                            scrollables[i].scrollLeft = saved.left;
+                            break;
+                        }
+                    }
+                });
+            }
+
+            // Restore <details> open state
+            if (state.details.length) {
+                target.querySelectorAll('details').forEach(function(d) {
+                    var ident = d.id || d.querySelector('summary').textContent.trim();
+                    if (state.details.indexOf(ident) !== -1) {
+                        d.open = true;
+                    }
+                });
+            }
+
+            delete _savedState[target.id];
+        });
+    })();
+    </script>
 </body>
 </html>

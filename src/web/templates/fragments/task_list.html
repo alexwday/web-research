@@ -1,5 +1,5 @@
 {% for task in tasks %}
-<tr>
+<tr class="task-row" onclick="toggleTaskQueries({{ task.id }})">
     <td>{{ task.id }}</td>
     <td>{{ task.topic[:60] }}{% if task.topic|length > 60 %}...{% endif %}</td>
     <td>
@@ -9,5 +9,19 @@
     <td>{{ task.priority }}</td>
     <td>{{ "{:,}".format(task.word_count) if task.word_count else "-" }}</td>
     <td>{{ task.citation_count if task.citation_count else "-" }}</td>
+</tr>
+<tr class="task-queries-row" id="task-queries-{{ task.id }}" style="display:none">
+    <td colspan="6">
+        {% set queries = task_queries.get(task.id, []) if task_queries is defined else [] %}
+        {% if queries %}
+        <ul class="task-queries-list">
+            {% for q in queries %}
+            <li>{{ q.query_text }}</li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <span class="task-queries-empty">No search queries recorded</span>
+        {% endif %}
+    </td>
 </tr>
 {% endfor %}

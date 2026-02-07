@@ -5,6 +5,7 @@ Handles web search, content extraction, and file operations
 import re
 import time
 import random
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -112,14 +113,16 @@ class RateLimiter:
         self.calls_per_minute = calls_per_minute
         self.interval = 60.0 / calls_per_minute
         self.last_call = 0.0
+        self._lock = threading.Lock()
     
     def wait(self):
         """Wait if necessary to respect rate limit"""
-        now = time.time()
-        elapsed = now - self.last_call
-        if elapsed < self.interval:
-            time.sleep(self.interval - elapsed)
-        self.last_call = time.time()
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            if elapsed < self.interval:
+                time.sleep(self.interval - elapsed)
+            self.last_call = time.time()
 
 
 # Rate limiters

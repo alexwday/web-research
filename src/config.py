@@ -91,6 +91,7 @@ class Source(BaseModel):
     domain: str
     snippet: Optional[str] = None
     full_content: Optional[str] = None
+    extracted_content: Optional[str] = None
     quality_score: float = 0.5
     is_academic: bool = False
     accessed_at: Optional[datetime] = None

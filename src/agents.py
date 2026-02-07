@@ -327,6 +327,20 @@ If the gathered material is sufficient, return:
 }}"""
 
 
+SOURCE_EXTRACTION_SYSTEM_PROMPT = """You are a Research Extractor. Given a web page and a research task, extract the key findings relevant to the task.
+
+Extract:
+1. Key facts, statistics, and data points
+2. Important quotes or claims
+3. Relevant context and background
+4. Specific examples or case studies
+
+Output concise, structured notes in Markdown. Use bullet points.
+Focus only on information relevant to the research task.
+Do NOT add commentary or analysis - just extract what the page says.
+Keep output under 1000 words."""
+
+
 QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Generate maximally diverse search queries — each must target a different angle or source type."""
 
 
@@ -804,7 +818,11 @@ class ResearcherAgent:
             queries = self._generate_queries(task, overall_query=overall_query)
 
             # Step 2: Execute searches and gather content
-            search_context, initial_source_count = self._execute_searches(queries, task.id, session_id=session_id)
+            search_context, initial_source_count = self._execute_searches(
+                queries, task.id, session_id=session_id,
+                task_topic=task.topic, task_description=task.description,
+                overall_query=overall_query,
+            )
 
             # Handle empty search results
             has_sources = bool(search_context and search_context.strip())
@@ -1099,8 +1117,42 @@ class ResearcherAgent:
                 )
         return results
 
-    def _execute_searches(self, queries: List[str], task_id: int, session_id: int = None) -> Tuple[str, int]:
-        """Execute searches in parallel and aggregate results.
+    def _extract_source_content(self, source: Source, task_topic: str, task_description: str, overall_query: str) -> str:
+        """Run LLM extraction on a single source. Thread-safe. Returns extracted text or empty string."""
+        content = source.full_content or source.snippet or ""
+        if not content.strip():
+            return ""
+
+        max_len = self.config.scraping.max_content_length
+        content_trimmed = content[:max_len]
+
+        prompt = (
+            f"Research Query: {overall_query}\n"
+            f"Task Topic: {task_topic}\n"
+            f"Task Description: {task_description}\n\n"
+            f"Source: {source.title}\n"
+            f"URL: {source.url}\n\n"
+            f"--- PAGE CONTENT ---\n{content_trimmed}\n--- END ---"
+        )
+
+        try:
+            result = self.client.complete(
+                prompt=prompt,
+                system=SOURCE_EXTRACTION_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.analyzer,
+                temperature=self.config.llm.temperature.analyzer,
+                model=self.config.llm.models.analyzer,
+            )
+            return result.strip() if result else ""
+        except Exception as e:
+            logger.warning(f"Source extraction failed for {source.url}: {e}")
+            return ""
+
+    def _execute_searches(
+        self, queries: List[str], task_id: int, session_id: int = None,
+        task_topic: str = "", task_description: str = "", overall_query: str = "",
+    ) -> Tuple[str, int]:
+        """Execute searches in parallel, extract per-source content, and aggregate results.
 
         Returns (context_string, source_count).
         """
@@ -1127,8 +1179,8 @@ class ResearcherAgent:
 
         logger.info(f"Total unique results: {len(all_results)}")
 
-        # Phase 2: Extract full content from top results
-        context_parts = []
+        # Phase 2: Scrape and save sources
+        saved_sources = []  # list of (position, Source pydantic object with id)
         sources_added = 0
         max_sources = self.config.search.max_results
         min_tavily = getattr(self.config.search, 'min_tavily_score', 0.3)
@@ -1138,12 +1190,10 @@ class ResearcherAgent:
             if not url:
                 continue
 
-            # Skip blocked sources before scraping
             if is_blocked_source(url):
                 logger.info(f"Blocked source (skipping): {url}")
                 continue
 
-            # Skip results with very low Tavily relevance score
             tavily_score = result.get('score', 1.0)
             if tavily_score < min_tavily:
                 logger.info(f"Low Tavily score ({tavily_score:.2f}), skipping: {url}")
@@ -1154,30 +1204,15 @@ class ResearcherAgent:
                 source = extract_source_info(url, result)
                 logger.info(f"Source: {url[:60]} quality={source.quality_score} content_len={len(source.full_content or '')}")
 
-                # Check quality threshold
                 if source.quality_score < self.config.quality.min_source_quality:
                     logger.info(f"Skipping low-quality source: {url}")
                     continue
 
-                # Build context — use configured max_content_length
                 content = source.full_content or source.snippet or ""
-                max_len = self.config.scraping.max_content_length
                 if content:
-                    # Save source to database only when it will appear in the prompt
-                    # (position must match prompt order for citation correctness)
-                    self.db.add_source(source, task_id, position=sources_added)
-
+                    db_source = self.db.add_source(source, task_id, position=sources_added)
+                    saved_sources.append((sources_added, source, db_source))
                     sources_added += 1
-                    content_str = content[:max_len]
-                    if len(content) > max_len:
-                        content_str += "\n[... content truncated ...]"
-                    context_parts.append(
-                        f"\n### Source {sources_added}: {source.title}\n"
-                        f"URL: {source.url}\n"
-                        f"Domain: {source.domain}\n"
-                        f"{'[Academic Source]' if source.is_academic else ''}\n\n"
-                        f"{content_str}\n"
-                    )
 
                     if sources_added >= max_sources:
                         break
@@ -1185,6 +1220,61 @@ class ResearcherAgent:
             except Exception as e:
                 logger.warning(f"Failed to extract from {url}: {e}")
                 continue
+
+        # Phase 3: Run LLM extraction on each source in parallel
+        extraction_results = {}  # position -> extracted_content
+        if saved_sources and task_topic:
+            with ThreadPoolExecutor(max_workers=min(len(saved_sources), 4)) as executor:
+                future_map = {
+                    executor.submit(
+                        self._extract_source_content, src, task_topic, task_description, overall_query
+                    ): pos
+                    for pos, src, db_src in saved_sources
+                }
+                for future in as_completed(future_map):
+                    pos = future_map[future]
+                    try:
+                        extracted = future.result()
+                        if extracted:
+                            extraction_results[pos] = extracted
+                    except Exception as e:
+                        logger.warning(f"Extraction future failed for position {pos}: {e}")
+
+            # Persist extracted content to DB
+            for pos, src, db_src in saved_sources:
+                extracted = extraction_results.get(pos)
+                if extracted and db_src.id:
+                    try:
+                        self.db.update_source_extraction(task_id, db_src.id, extracted)
+                    except Exception as e:
+                        logger.warning(f"Failed to save extraction for source {db_src.id}: {e}")
+
+        # Phase 4: Build context string from extracted content (or fall back to raw)
+        context_parts = []
+        for pos, src, db_src in saved_sources:
+            extracted = extraction_results.get(pos)
+            if extracted:
+                context_parts.append(
+                    f"\n### Source {pos + 1}: {src.title}\n"
+                    f"URL: {src.url}\n"
+                    f"Domain: {src.domain}\n"
+                    f"{'[Academic Source]' if src.is_academic else ''}\n\n"
+                    f"{extracted}\n"
+                )
+            else:
+                # Fall back to raw content
+                content = src.full_content or src.snippet or ""
+                max_len = self.config.scraping.max_content_length
+                content_str = content[:max_len]
+                if len(content) > max_len:
+                    content_str += "\n[... content truncated ...]"
+                context_parts.append(
+                    f"\n### Source {pos + 1}: {src.title}\n"
+                    f"URL: {src.url}\n"
+                    f"Domain: {src.domain}\n"
+                    f"{'[Academic Source]' if src.is_academic else ''}\n\n"
+                    f"{content_str}\n"
+                )
 
         return "\n\n---\n\n".join(context_parts), sources_added
 

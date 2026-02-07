@@ -31,6 +31,7 @@ task_source_association = Table(
     Column('task_id', Integer, ForeignKey('tasks.id'), primary_key=True),
     Column('source_id', Integer, ForeignKey('sources.id'), primary_key=True),
     Column('position', Integer, default=0),
+    Column('extracted_content', Text, nullable=True),
 )
 
 
@@ -93,6 +94,7 @@ class SourceModel(Base):
     snippet = Column(Text, nullable=True)
     # Retained for debugging and potential future re-synthesis of sections
     full_content = Column(Text, nullable=True)
+    extracted_content = Column(Text, nullable=True)
     quality_score = Column(Float, default=0.5)
     is_academic = Column(Boolean, default=False)
     accessed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -108,6 +110,7 @@ class SourceModel(Base):
             domain=self.domain,
             snippet=self.snippet,
             full_content=self.full_content,
+            extracted_content=self.extracted_content,
             quality_score=self.quality_score,
             is_academic=self.is_academic,
             accessed_at=self.accessed_at,
@@ -271,6 +274,7 @@ class DatabaseManager:
         self._migrate_task_columns()
         self._migrate_section_tables()
         self._migrate_refinement_columns()
+        self._migrate_source_columns()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -302,14 +306,22 @@ class DatabaseManager:
                 conn.commit()
 
     def _migrate_association_columns(self):
-        """Add position column to task_source_association for existing databases."""
+        """Add missing columns to task_source_association for existing databases."""
         with self.engine.connect() as conn:
             rows = conn.execute(text("PRAGMA table_info(task_source_association)")).fetchall()
             existing = {row[1] for row in rows}
+            changed = False
             if "position" not in existing:
                 conn.execute(text(
                     "ALTER TABLE task_source_association ADD COLUMN position INTEGER DEFAULT 0"
                 ))
+                changed = True
+            if "extracted_content" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE task_source_association ADD COLUMN extracted_content TEXT"
+                ))
+                changed = True
+            if changed:
                 conn.commit()
 
     def _migrate_task_columns(self):
@@ -353,6 +365,17 @@ class DatabaseManager:
                         f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}"
                     ))
             conn.commit()
+
+    def _migrate_source_columns(self):
+        """Add extracted_content column to sources table for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(sources)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "extracted_content" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE sources ADD COLUMN extracted_content TEXT"
+                ))
+                conn.commit()
 
     def get_sync_session(self):
         """Get a synchronous session"""
@@ -705,7 +728,12 @@ class DatabaseManager:
     def get_sources_for_section(self, section_id: int) -> List[Source]:
         """Get all sources linked to tasks in a section, ordered by position"""
         with self.get_sync_session() as session:
-            results = session.query(SourceModel).join(
+            rows = session.query(
+                SourceModel,
+                task_source_association.c.task_id,
+                task_source_association.c.position,
+                task_source_association.c.extracted_content,
+            ).join(
                 task_source_association,
                 SourceModel.id == task_source_association.c.source_id
             ).join(
@@ -713,8 +741,23 @@ class DatabaseManager:
                 TaskModel.id == task_source_association.c.task_id
             ).filter(
                 TaskModel.section_id == section_id
-            ).order_by(task_source_association.c.position).distinct().all()
-            return [r.to_pydantic() for r in results]
+            ).order_by(
+                task_source_association.c.position.asc(),
+                task_source_association.c.task_id.asc()
+            ).all()
+
+            # Deduplicate by source ID while preserving first appearance order.
+            by_source: Dict[int, Source] = {}
+            ordered_ids: List[int] = []
+            for source_model, task_id, _position, assoc_extracted in rows:
+                if source_model.id in by_source:
+                    continue
+                src = source_model.to_pydantic()
+                src.task_ids = [task_id] if task_id is not None else []
+                src.extracted_content = assoc_extracted
+                by_source[source_model.id] = src
+                ordered_ids.append(source_model.id)
+            return [by_source[sid] for sid in ordered_ids]
 
     # =========================================================================
     # SOURCE OPERATIONS
@@ -745,7 +788,15 @@ class DatabaseManager:
                                 position=position,
                             )
                         )
-                        session.commit()
+                    elif assoc_exists.position != position:
+                        # Keep latest prompt ordering stable across retries/re-runs.
+                        session.execute(
+                            task_source_association.update().where(
+                                task_source_association.c.task_id == task_id,
+                                task_source_association.c.source_id == existing.id,
+                            ).values(position=position)
+                        )
+                    session.commit()
                 return existing.to_pydantic()
 
             # Create new source
@@ -790,6 +841,48 @@ class DatabaseManager:
             ).first()
             return result.to_pydantic() if result else None
     
+    def update_source_extraction(self, task_id: int, source_id: int, extracted_content: str):
+        """Update extracted content for a task-source association row."""
+        with self.get_sync_session() as session:
+            session.execute(
+                task_source_association.update().where(
+                    task_source_association.c.task_id == task_id,
+                    task_source_association.c.source_id == source_id,
+                ).values(extracted_content=extracted_content)
+            )
+            session.commit()
+
+    def get_processed_urls_by_task(self, session_id: int) -> Dict[int, set[str]]:
+        """Return {task_id: {url, ...}} for session results that have been processed."""
+        processed: Dict[int, set[str]] = {}
+        with self.get_sync_session() as session:
+            rows = session.query(
+                TaskModel.id,
+                SourceModel.url,
+                task_source_association.c.extracted_content,
+                SourceModel.full_content,
+                SourceModel.snippet,
+            ).join(
+                task_source_association,
+                TaskModel.id == task_source_association.c.task_id
+            ).join(
+                SourceModel,
+                SourceModel.id == task_source_association.c.source_id
+            ).filter(
+                TaskModel.session_id == session_id
+            ).all()
+
+            for task_id, url, assoc_extracted, full_content, snippet in rows:
+                if not url:
+                    continue
+                if any([
+                    bool((assoc_extracted or "").strip()),
+                    bool((full_content or "").strip()),
+                    bool((snippet or "").strip()),
+                ]):
+                    processed.setdefault(task_id, set()).add(url)
+        return processed
+
     def get_source_count(self, session_id: int = None) -> int:
         """Get count of sources"""
         with self.get_sync_session() as session:
@@ -863,6 +956,22 @@ class DatabaseManager:
                 SearchEventModel.session_id == session_id
             ).order_by(SearchEventModel.created_at).all()
 
+    def get_search_queries_by_task(self, session_id: int) -> Dict[int, List[Dict]]:
+        """Return {task_id: [{query_text, query_group}, ...]} for query events in a session."""
+        result: Dict[int, List[Dict]] = {}
+        with self.get_sync_session() as session:
+            events = session.query(SearchEventModel).filter(
+                SearchEventModel.session_id == session_id,
+                SearchEventModel.task_id != None,  # noqa: E711
+                SearchEventModel.event_type == "query",
+            ).order_by(SearchEventModel.created_at).all()
+            for ev in events:
+                result.setdefault(ev.task_id, []).append({
+                    "query_text": ev.query_text or "",
+                    "query_group": ev.query_group or "",
+                })
+        return result
+
     # =========================================================================
     # STATISTICS
     # =========================================================================
@@ -906,18 +1015,32 @@ class DatabaseManager:
     def get_sources_for_task(self, task_id: int) -> List[Source]:
         """Get sources linked to a specific task, ordered by presentation position."""
         with self.get_sync_session() as session:
-            results = session.query(SourceModel).join(
+            rows = session.query(
+                SourceModel,
+                task_source_association.c.extracted_content,
+            ).join(
                 task_source_association,
                 SourceModel.id == task_source_association.c.source_id
             ).filter(
                 task_source_association.c.task_id == task_id
             ).order_by(task_source_association.c.position).all()
-            return [r.to_pydantic() for r in results]
+
+            sources: List[Source] = []
+            for source_model, assoc_extracted in rows:
+                src = source_model.to_pydantic()
+                src.task_ids = [task_id]
+                src.extracted_content = assoc_extracted
+                sources.append(src)
+            return sources
 
     def get_sources_for_session(self, session_id: int) -> List[Source]:
         """Get sources linked to tasks in a specific session"""
         with self.get_sync_session() as session:
-            results = session.query(SourceModel).join(
+            rows = session.query(
+                SourceModel,
+                task_source_association.c.task_id,
+                task_source_association.c.extracted_content,
+            ).join(
                 task_source_association,
                 SourceModel.id == task_source_association.c.source_id
             ).join(
@@ -925,8 +1048,25 @@ class DatabaseManager:
                 TaskModel.id == task_source_association.c.task_id
             ).filter(
                 TaskModel.session_id == session_id
-            ).distinct().order_by(SourceModel.id).all()
-            return [r.to_pydantic() for r in results]
+            ).order_by(SourceModel.id, task_source_association.c.task_id).all()
+
+            by_source: Dict[int, Source] = {}
+            ordered_ids: List[int] = []
+            for source_model, task_id, assoc_extracted in rows:
+                if source_model.id not in by_source:
+                    src = source_model.to_pydantic()
+                    src.task_ids = []
+                    src.extracted_content = None
+                    by_source[source_model.id] = src
+                    ordered_ids.append(source_model.id)
+
+                src = by_source[source_model.id]
+                if task_id is not None and task_id not in src.task_ids:
+                    src.task_ids.append(task_id)
+                if not src.extracted_content and assoc_extracted:
+                    src.extracted_content = assoc_extracted
+
+            return [by_source[sid] for sid in ordered_ids]
 
 
 # Global database manager instance

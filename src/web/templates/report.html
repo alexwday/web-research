@@ -1,42 +1,48 @@
 {% extends "base.html" %}
 {% block title %}Report Preview – Deep Research Agent{% endblock %}
+{% block container_class %}report-container{% endblock %}
 
 {% block content %}
 {% set sp = "&session=" ~ session_id|string if session_id else "" %}
 {% set sq = "?session=" ~ session_id|string if session_id else "" %}
-<h1 class="page-title">Report Preview</h1>
+<div class="report-title-row">
+    <h1 class="page-title">Report Preview</h1>
+    {% if sections %}
+    <span class="report-stats-pill">{{ sections|length }} sections &middot; {{ "{:,}".format(stats.get("total_words", 0)) }} words &middot; {{ stats.get("total_sources", 0) }} sources</span>
+    {% endif %}
+</div>
 
 {% if sections %}
-<!-- Summary bar -->
-<div class="report-summary-bar">
-    <span>{{ sections|length }} sections</span>
-    <span>{{ "{:,}".format(stats.get("total_words", 0)) }} words</span>
-    <span>{{ stats.get("total_sources", 0) }} sources</span>
-</div>
+<!-- Unified report toolbar -->
+<div class="report-toolbar">
+    <div class="report-toolbar-left">
+        {% if view != 'paged' and view != 'compiled' %}
+        <button class="btn btn-sm btn-outline" id="toggle-all-btn" onclick="toggleAllSections()">Expand All</button>
+        {% endif %}
+    </div>
 
-<!-- Download bar -->
-{% if has_compiled_report or (session and session.report_markdown_path) %}
-<div class="download-bar">
-    <span>Download:</span>
-    {% if session and session.report_markdown_path %}
-    <a href="/report/download/markdown{{ sq }}" class="btn btn-sm btn-outline">Markdown</a>
-    {% endif %}
-    {% if session and session.report_html_path %}
-    <a href="/report/download/html{{ sq }}" class="btn btn-sm btn-outline">HTML</a>
-    {% endif %}
-</div>
-{% endif %}
+    <div class="report-toolbar-center">
+        <button class="btn btn-sm {% if view != 'paged' and view != 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
+                onclick="switchView('scroll')">Scroll View</button>
+        <button class="btn btn-sm {% if view == 'paged' %}btn-primary{% else %}btn-outline{% endif %}"
+                onclick="switchView('paged')">Page View</button>
+        {% if has_compiled_report %}
+        <button class="btn btn-sm {% if view == 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
+                onclick="switchView('compiled')">Final Report</button>
+        {% endif %}
+    </div>
 
-<!-- View toggle -->
-<div class="view-toggle">
-    <button class="btn btn-sm {% if view != 'paged' and view != 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
-            onclick="switchView('scroll')">Scroll View</button>
-    <button class="btn btn-sm {% if view == 'paged' %}btn-primary{% else %}btn-outline{% endif %}"
-            onclick="switchView('paged')">Page View</button>
-    {% if has_compiled_report %}
-    <button class="btn btn-sm {% if view == 'compiled' %}btn-primary{% else %}btn-outline{% endif %}"
-            onclick="switchView('compiled')">Final Report</button>
-    {% endif %}
+    <div class="report-toolbar-right">
+        {% if has_compiled_report or (session and session.report_markdown_path) %}
+        <span class="report-toolbar-label">Download:</span>
+        {% if session and session.report_markdown_path %}
+        <a href="/report/download/markdown{{ sq }}" class="btn btn-sm btn-outline">Markdown</a>
+        {% endif %}
+        {% if session and session.report_html_path %}
+        <a href="/report/download/html{{ sq }}" class="btn btn-sm btn-outline">HTML</a>
+        {% endif %}
+        {% endif %}
+    </div>
 </div>
 
 {% if view == 'compiled' and has_compiled_report %}
@@ -54,75 +60,84 @@
 </div>
 
 {% else %}
-<!-- Scroll view: exec summary + TOC + sections + conclusion + bibliography -->
-<div class="report-controls">
-    <button class="btn btn-sm btn-outline" id="toggle-all-btn" onclick="toggleAllSections()">Expand All</button>
-</div>
+<!-- Scroll view: 3-column layout -->
+<div class="report-three-col">
+    <!-- LEFT: Sticky TOC -->
+    <aside class="report-sidebar report-sidebar-left">
+        <nav class="report-toc-sticky">
+            <h3>Contents</h3>
+            <ul class="report-toc-list">
+                {% if exec_summary_html %}
+                <li><a href="#exec-summary">Executive Summary</a></li>
+                {% endif %}
+                {% for section in sections %}
+                <li><a href="#section-{{ section.id }}">{{ loop.index }}. {{ section.topic }}</a></li>
+                {% endfor %}
+                {% if conclusion_html %}
+                <li><a href="#conclusion">Conclusion</a></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </aside>
 
-{% if exec_summary_html %}
-<div class="report-card">
-    <h3>Executive Summary</h3>
-    <div class="report-card-body report-content">
-        {{ exec_summary_html | safe }}
-    </div>
-</div>
-{% endif %}
-
-<nav class="report-toc">
-    <h3>Table of Contents</h3>
-    <ol>
-        {% for section in sections %}
-        <li>
-            <a href="#section-{{ section.id }}">{{ section.topic }}</a>
-            <span class="toc-meta">{{ "{:,}".format(section.word_count) }} words</span>
-        </li>
-        {% endfor %}
-    </ol>
-</nav>
-
-<div class="report-content">
-    {% for section in sections %}
-    <details class="report-section" id="section-{{ section.id }}">
-        <summary class="section-header">
-            <h2>{{ loop.index }}. {{ section.topic }}</h2>
-            <span class="section-meta">
-                {{ "{:,}".format(section.word_count) }} words
-                {% if section.citation_count %} · {{ section.citation_count }} citations{% endif %}
-            </span>
-        </summary>
-        <div class="section-body">
-            {{ section.html | safe }}
-            <div class="section-back-to-top">
-                <a href="#top">Back to top</a>
+    <!-- CENTER: Report content -->
+    <main class="report-main">
+        {% if exec_summary_html %}
+        <div class="report-card" id="exec-summary">
+            <h3>Executive Summary</h3>
+            <div class="report-card-body report-content">
+                {{ exec_summary_html | safe }}
             </div>
         </div>
-    </details>
-    {% endfor %}
-</div>
+        {% endif %}
 
-{% if conclusion_html %}
-<div class="report-card">
-    <h3>Conclusion</h3>
-    <div class="report-card-body report-content">
-        {{ conclusion_html | safe }}
-    </div>
-</div>
-{% endif %}
+        <div class="report-content">
+            {% for section in sections %}
+            <details class="report-section" id="section-{{ section.id }}">
+                <summary class="section-header">
+                    <h2>{{ loop.index }}. {{ section.topic }}</h2>
+                    <span class="section-meta">
+                        {{ "{:,}".format(section.word_count) }} words
+                        {% if section.citation_count %} · {{ section.citation_count }} citations{% endif %}
+                    </span>
+                </summary>
+                <div class="section-body">
+                    {{ section.html | safe }}
+                    <div class="section-back-to-top">
+                        <a href="#top">Back to top</a>
+                    </div>
+                </div>
+            </details>
+            {% endfor %}
+        </div>
 
-{% if sources %}
-<div class="report-card">
-    <h3>Bibliography</h3>
-    <ol class="bibliography-list">
-        {% for s in sources %}
-        <li>
-            <strong>{{ s.title }}</strong>
-            {% if s.is_academic %}<span class="badge badge-academic">Academic</span>{% endif %}<br>
-            <a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>
-        </li>
-        {% endfor %}
-    </ol>
+        {% if conclusion_html %}
+        <div class="report-card" id="conclusion">
+            <h3>Conclusion</h3>
+            <div class="report-card-body report-content">
+                {{ conclusion_html | safe }}
+            </div>
+        </div>
+        {% endif %}
+    </main>
+
+    <!-- RIGHT: Sticky bibliography -->
+    <aside class="report-sidebar report-sidebar-right">
+        {% if sources %}
+        <div class="report-bib-sticky">
+            <h3>References</h3>
+            <ol class="report-bib-list">
+                {% for s in sources %}
+                <li>
+                    <a href="{{ s.url }}" target="_blank" rel="noopener" title="{{ s.url }}">{{ s.title[:60] }}{% if s.title|length > 60 %}...{% endif %}</a>
+                    <span class="report-bib-domain">{{ s.domain }}</span>
+                </li>
+                {% endfor %}
+            </ol>
+        </div>
+        {% endif %}
+    </aside>
 </div>
-{% endif %}
 
 {% endif %}
 

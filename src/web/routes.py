@@ -277,7 +277,29 @@ def _build_flat_activity_context(session_id: Optional[int]) -> dict:
                 "url": ev.url or "",
                 "quality_score": ev.quality_score,
                 "created_at": getattr(ev, "created_at", None),
+                "is_processed": False,  # will be resolved below
             })
+
+    # Resolve processing status for result entries.
+    # A result is treated as processed once we have persisted any source payload
+    # (extracted notes OR raw content fallback) for that task+URL.
+    processed_by_task = db.get_processed_urls_by_task(session_id)
+    processed_any = set()
+    for urls in processed_by_task.values():
+        processed_any.update(urls)
+
+    for entry in entries:
+        if entry["type"] != "result":
+            continue
+        url = entry.get("url")
+        if not url:
+            continue
+        task_id = entry.get("task_id")
+        if task_id is not None:
+            if url in processed_by_task.get(task_id, set()):
+                entry["is_processed"] = True
+        elif url in processed_any:
+            entry["is_processed"] = True
 
     # Reverse for newest-first
     entries.reverse()
@@ -320,6 +342,13 @@ async def dashboard(request: Request, session: Optional[int] = None):
     db = _db()
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
+    all_sessions = db.get_all_sessions()
+    session_rows = []
+    for s in all_sessions:
+        session_rows.append({
+            "session": s,
+            "stats": db.get_statistics(session_id=s.id),
+        })
     stats = db.get_statistics(session_id=sid)
     running = _is_running()
 
@@ -350,6 +379,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
         "phase": phase,
         "current_tasks": current_tasks,
         "elapsed_seconds": elapsed_seconds,
+        "session_rows": session_rows,
         "refinement_enabled": refinement_enabled,
         **activity_log,
     })
@@ -370,9 +400,12 @@ async def tasks_page(request: Request, status: Optional[str] = None, session: Op
     else:
         task_list = db.get_all_tasks(session_id=sid)
 
+    task_queries = db.get_search_queries_by_task(sid) if sid else {}
+
     return templates.TemplateResponse("tasks.html", {
         "request": request,
         "tasks": task_list,
+        "task_queries": task_queries,
         "current_filter": status or "all",
         "session": resolved,
         "session_id": sid,
@@ -390,12 +423,50 @@ async def sources_page(request: Request, session: Optional[int] = None):
         source_list = db.get_sources_for_session(sid)
     else:
         source_list = db.get_all_sources()
-    # sort by quality_score descending
-    source_list.sort(key=lambda s: s.quality_score, reverse=True)
+
+    # Build task lookup for grouping
+    task_topics = {}
+    if sid:
+        for t in db.get_all_tasks(session_id=sid):
+            task_topics[t.id] = t.topic
+
+    # Group sources by task (use first task_id), sort groups by task id
+    task_groups = OrderedDict()
+    ungrouped = []
+    for s in source_list:
+        if s.task_ids:
+            first_task = min(s.task_ids)
+            task_groups.setdefault(first_task, []).append(s)
+        else:
+            ungrouped.append(s)
+
+    # Sort each group by quality_score descending
+    ordered_groups = []
+    for task_id in sorted(task_groups.keys()):
+        sources = task_groups[task_id]
+        sources.sort(key=lambda s: s.quality_score, reverse=True)
+        ordered_groups.append({
+            "task_id": task_id,
+            "task_topic": task_topics.get(task_id, f"Task {task_id}"),
+            "sources": sources,
+        })
+    if ungrouped:
+        ungrouped.sort(key=lambda s: s.quality_score, reverse=True)
+        ordered_groups.append({
+            "task_id": None,
+            "task_topic": "Ungrouped",
+            "sources": ungrouped,
+        })
+
+    # Flat list for backwards compat (total count)
+    all_sources = []
+    for g in ordered_groups:
+        all_sources.extend(g["sources"])
 
     return templates.TemplateResponse("sources.html", {
         "request": request,
-        "sources": source_list,
+        "sources": all_sources,
+        "source_groups": ordered_groups,
         "session": resolved,
         "session_id": sid,
         "page": "sources",
@@ -942,9 +1013,12 @@ async def fragment_task_list(request: Request, status: Optional[str] = None, ses
     else:
         task_list = db.get_all_tasks(session_id=sid)
 
+    task_queries = db.get_search_queries_by_task(sid) if sid else {}
+
     return templates.TemplateResponse("fragments/task_list.html", {
         "request": request,
         "tasks": task_list,
+        "task_queries": task_queries,
     })
 
 

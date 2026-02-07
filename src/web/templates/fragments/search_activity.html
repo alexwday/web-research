@@ -16,7 +16,11 @@
 
         {% elif entry.type == "result" %}
         <span class="feed-icon">
-            <span class="feed-dot {% if entry.quality_score is not none %}{% if entry.quality_score >= 0.8 %}dot-green{% elif entry.quality_score >= 0.6 %}dot-yellow{% else %}dot-red{% endif %}{% endif %}"></span>
+            {% if entry.is_processed %}
+            <svg class="feed-status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            {% else %}
+            <span class="feed-spinner"></span>
+            {% endif %}
         </span>
         <span class="feed-text">Found: {% if entry.url %}<a href="{{ entry.url }}" target="_blank" rel="noopener">{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}</a>{% else %}{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}{% endif %}</span>
         {% if entry.quality_score is not none %}
