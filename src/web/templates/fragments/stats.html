@@ -8,11 +8,33 @@
 
 <div class="stats-panels">
 
+    {% set r = running if running is defined else false %}
+    {% set p = phase if phase is defined else "idle" %}
+    {% set el = elapsed_seconds if elapsed_seconds is defined else 0 %}
+
     {# ── Pipeline panel ─────────────────────────────────── #}
     <div class="sp-panel sp-blue">
         <div class="sp-header">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             <span>Pipeline</span>
+            {% if r or p != "idle" %}
+            <span class="sp-phase-label">
+                <span class="phase-dot {% if r %}phase-dot-active{% endif %}"></span>
+                {% if p == "pre_planning" %}Pre-planning
+                {% elif p == "outline_design" %}Designing outline
+                {% elif p == "task_planning" %}Planning tasks
+                {% elif p == "researching" %}Researching
+                {% elif p == "gap_analysis" %}Analyzing gaps
+                {% elif p == "synthesizing" %}Synthesizing
+                {% elif p == "compiling" %}Compiling
+                {% elif p == "complete" %}Complete
+                {% else %}Running
+                {% endif %}
+            </span>
+            {% if el > 0 %}
+            <span class="elapsed-timer" data-start="{{ el }}">{{ "%d:%02d:%02d"|format(el // 3600, (el % 3600) // 60, el % 60) }}</span>
+            {% endif %}
+            {% endif %}
         </div>
         <div class="sp-body sp-pipeline-body">
             <div class="sp-ring-wrap">

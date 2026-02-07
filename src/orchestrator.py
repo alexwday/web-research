@@ -129,23 +129,31 @@ class ResearchOrchestrator:
                 if not self.is_running:
                     return self._emergency_compile()
 
-                # Phase 3: Task Planning per Section
+                # Phase 3: Task Planning per Section (parallel)
                 self.phase = "task_planning"
                 print_info("Phase 3: Planning research tasks per section...")
                 max_total = self.config.research.max_total_tasks
-                total_created = 0
-                for section in sections:
+                budget_per_section = max(1, max_total // len(sections)) if sections else max_total
+
+                def _plan_section(sec):
                     if not self.is_running:
-                        break
-                    if total_created >= max_total:
-                        logger.warning(f"Reached max_total_tasks ({max_total}), skipping remaining sections")
-                        break
-                    tasks = self.section_planner.plan_tasks_for_section(
-                        section, sections, self.query, self.session_id,
-                        task_budget=max_total - total_created,
+                        return sec, []
+                    return sec, self.section_planner.plan_tasks_for_section(
+                        sec, sections, self.query, self.session_id,
+                        task_budget=budget_per_section,
                     )
-                    total_created += len(tasks)
-                    print_info(f"  {section.title}: {len(tasks)} tasks")
+
+                total_created = 0
+                with ThreadPoolExecutor(max_workers=min(len(sections), 4)) as plan_exec:
+                    futures = {plan_exec.submit(_plan_section, s): s for s in sections}
+                    for future in as_completed(futures):
+                        try:
+                            sec, tasks = future.result()
+                            total_created += len(tasks)
+                            print_info(f"  {sec.title}: {len(tasks)} tasks")
+                        except Exception as e:
+                            sec = futures[future]
+                            logger.error(f"Task planning failed for '{sec.title}': {e}")
 
                 # Show task overview
                 all_tasks = self.db.get_all_tasks(session_id=self.session_id)
@@ -442,52 +450,65 @@ class ResearchOrchestrator:
             self.db.add_glossary_term(term, session_id=self.session_id)
 
     def _synthesize_all_sections(self, query: str, sections: list):
-        """Synthesize all sections in order, providing adjacent context."""
-        for i, section in enumerate(sections):
-            if not self.is_running:
-                break
+        """Synthesize all sections in parallel, providing adjacent context."""
 
-            # Skip already synthesized sections
+        # Pre-compute adjacent context from descriptions (always available,
+        # no dependency on other sections' synthesis output).
+        def _build_adjacent(i):
+            adjacent = {"previous": "", "next": ""}
+            if i > 0:
+                prev = sections[i - 1]
+                adjacent["previous"] = f"**{prev.title}**: {prev.description}"
+            if i < len(sections) - 1:
+                nxt = sections[i + 1]
+                adjacent["next"] = f"**{nxt.title}**: {nxt.description}"
+            return adjacent
+
+        # Filter to sections that need synthesis
+        to_synthesize = []
+        for i, section in enumerate(sections):
             if section.status == SectionStatus.COMPLETE.value or section.status == "complete":
                 print_info(f"  Section '{section.title}' already synthesized, skipping")
                 continue
-
-            # Check if section has completed tasks
             tasks = self.db.get_tasks_for_section(section.id)
             completed = [t for t in tasks if t.status == "completed"]
             if not completed:
                 print_warning(f"  Section '{section.title}' has no completed tasks, skipping")
                 continue
+            to_synthesize.append((i, section))
 
-            # Build adjacent section context
-            adjacent = {"previous": "", "next": ""}
+        if not to_synthesize:
+            print_success("Section synthesis complete (nothing to do)")
+            return
 
-            if i > 0:
-                prev = sections[i - 1]
-                if prev.synthesized_content:
-                    words = prev.synthesized_content.split()
-                    adjacent["previous"] = f"**{prev.title}**: " + " ".join(words[:200])
-                    if len(words) > 200:
-                        adjacent["previous"] += " ..."
-
-            if i < len(sections) - 1:
-                nxt = sections[i + 1]
-                adjacent["next"] = f"**{nxt.title}**: {nxt.description}"
-
+        def _synthesize_one(idx_section):
+            i, section = idx_section
+            if not self.is_running:
+                return section, None
+            adjacent = _build_adjacent(i)
             print_info(f"  Synthesizing: {section.title}")
             content = self.synthesizer.synthesize_section(
                 section, query, sections, adjacent, self.session_id
             )
+            return section, content
 
-            if content:
-                word_count = count_words(content)
-                citation_count = count_citations(content)
-                self.db.mark_section_synthesized(
-                    section.id, content, word_count, citation_count
-                )
-                # Update section object for use in adjacent context
-                section.synthesized_content = content
-                print_info(f"    {word_count} words, {citation_count} citations")
+        max_workers = min(len(to_synthesize), 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as synth_exec:
+            futures = {synth_exec.submit(_synthesize_one, item): item for item in to_synthesize}
+            for future in as_completed(futures):
+                try:
+                    section, content = future.result()
+                    if content:
+                        word_count = count_words(content)
+                        citation_count = count_citations(content)
+                        self.db.mark_section_synthesized(
+                            section.id, content, word_count, citation_count
+                        )
+                        section.synthesized_content = content
+                        print_info(f"    {section.title}: {word_count} words, {citation_count} citations")
+                except Exception as e:
+                    item = futures[future]
+                    logger.error(f"Synthesis failed for '{item[1].title}': {e}")
 
         print_success("Section synthesis complete")
 

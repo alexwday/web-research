@@ -214,6 +214,82 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
     }
 
 
+def _build_flat_activity_context(session_id: Optional[int]) -> dict:
+    """Build flat chronological activity feed (reverse order)."""
+    empty = {
+        "feed_entries": [],
+        "total_queries": 0,
+        "total_results": 0,
+        "unique_domains": 0,
+    }
+    if not session_id:
+        return empty
+
+    db = _db()
+    events = db.get_search_events(session_id)
+    if not events:
+        return empty
+
+    task_topics = {t.id: t.topic for t in db.get_all_tasks(session_id=session_id)}
+
+    entries = []
+    total_queries = 0
+    total_results = 0
+    domains = set()
+
+    for ev in events:
+        if ev.event_type == "agent_action":
+            total_queries += 1
+            entries.append({
+                "type": "action",
+                "text": (ev.query_text or "").strip(),
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+                "url": None,
+                "quality_score": None,
+                "created_at": getattr(ev, "created_at", None),
+            })
+        elif ev.event_type == "query":
+            total_queries += 1
+            entries.append({
+                "type": "search",
+                "text": (ev.query_text or "").strip() or "(query unavailable)",
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+                "url": None,
+                "quality_score": None,
+                "created_at": getattr(ev, "created_at", None),
+            })
+        elif ev.event_type == "result":
+            total_results += 1
+            if ev.url:
+                try:
+                    netloc = urlparse(ev.url).netloc
+                    if netloc:
+                        domains.add(netloc)
+                except Exception:
+                    pass
+            entries.append({
+                "type": "result",
+                "text": ev.title or "Untitled",
+                "task_id": ev.task_id,
+                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
+                "url": ev.url or "",
+                "quality_score": ev.quality_score,
+                "created_at": getattr(ev, "created_at", None),
+            })
+
+    # Reverse for newest-first
+    entries.reverse()
+
+    return {
+        "feed_entries": entries,
+        "total_queries": total_queries,
+        "total_results": total_results,
+        "unique_domains": len(domains),
+    }
+
+
 # =========================================================================
 # Full HTML pages
 # =========================================================================
@@ -258,7 +334,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
     elapsed_seconds = 0
     if resolved and resolved.started_at:
         elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
-    activity_log = _build_activity_log_context(sid)
+    activity_log = _build_flat_activity_context(sid)
 
     refinement_enabled = get_config().query_refinement.enabled
 
@@ -642,10 +718,16 @@ async def api_research_stop():
 
 @router.post("/api/research/refine")
 async def api_research_refine(request: Request):
-    """Accept query + settings, generate questions via LLM, return redirect URL."""
+    """Accept query + settings, generate questions via LLM.
+
+    Returns JSON when Accept: application/json, otherwise redirects to /refine.
+    """
     _cleanup_refine_tokens()
 
     content_type = request.headers.get("content-type", "")
+    accept = request.headers.get("accept", "")
+    want_json = "application/json" in accept or "json" in content_type
+
     if "json" in content_type:
         body = await request.json()
         query = body.get("query", "").strip()
@@ -688,6 +770,9 @@ async def api_research_refine(request: Request):
         "created_at": datetime.now(timezone.utc),
     }
 
+    if want_json:
+        return JSONResponse({"token": token, "questions": questions})
+
     return RedirectResponse(url=f"/refine?token={token}", status_code=303)
 
 
@@ -720,9 +805,22 @@ async def refine_page(request: Request, token: str = "", step: Optional[str] = N
 
 @router.post("/api/research/brief")
 async def api_research_brief(request: Request):
-    """Accept answers, generate brief via LLM, redirect to /refine."""
-    form = await request.form()
-    token = form.get("token", "")
+    """Accept answers, generate brief via LLM.
+
+    Returns JSON when Accept: application/json, otherwise redirects to /refine.
+    """
+    accept = request.headers.get("accept", "")
+    content_type = request.headers.get("content-type", "")
+    want_json = "application/json" in accept or "json" in content_type
+
+    if "json" in content_type:
+        body = await request.json()
+        token = body.get("token", "")
+        answers = body.get("answers", [])
+    else:
+        form = await request.form()
+        token = form.get("token", "")
+        answers = None
 
     if not token or token not in _refine_tokens:
         raise HTTPException(400, "Invalid or expired refinement token")
@@ -730,18 +828,22 @@ async def api_research_brief(request: Request):
     data = _refine_tokens[token]
     questions = data.get("questions", [])
 
-    # Collect answers from form
-    qa_pairs = []
-    for i, q in enumerate(questions):
-        answer = form.get(f"answer_{i}", "").strip()
-        custom = form.get(f"custom_{i}", "").strip()
-        # Custom answer takes precedence if provided
-        final_answer = custom if custom else answer
-        if final_answer:
-            qa_pairs.append({
-                "question": q["question"],
-                "answer": final_answer,
-            })
+    # Collect answers
+    if answers is not None:
+        # JSON path: answers is a list of {question, answer} dicts
+        qa_pairs = answers
+    else:
+        # Form path: answers come from form fields
+        qa_pairs = []
+        for i, q in enumerate(questions):
+            answer = form.get(f"answer_{i}", "").strip()
+            custom = form.get(f"custom_{i}", "").strip()
+            final_answer = custom if custom else answer
+            if final_answer:
+                qa_pairs.append({
+                    "question": q["question"],
+                    "answer": final_answer,
+                })
 
     # Store answers
     data["answers"] = qa_pairs
@@ -751,6 +853,9 @@ async def api_research_brief(request: Request):
     agent = QueryRefinementAgent()
     brief = agent.synthesize_brief(data["query"], qa_pairs)
     data["brief"] = brief
+
+    if want_json:
+        return JSONResponse({"brief": brief})
 
     return RedirectResponse(url=f"/refine?token={token}", status_code=303)
 
@@ -807,10 +912,18 @@ async def fragment_stats(request: Request, session: Optional[int] = None):
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
     stats = db.get_statistics(session_id=sid)
+    running = _is_running()
+    phase = _app().get_current_phase()
+    elapsed_seconds = 0
+    if resolved and resolved.started_at:
+        elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
     return templates.TemplateResponse("fragments/stats.html", {
         "request": request,
         "stats": stats,
         "token_stats": get_token_tracker().get_stats(),
+        "running": running,
+        "phase": phase,
+        "elapsed_seconds": elapsed_seconds,
     })
 
 
@@ -908,7 +1021,7 @@ async def fragment_activity(request: Request, session: Optional[int] = None):
 async def fragment_search_activity(request: Request, session: Optional[int] = None):
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
-    activity_log = _build_activity_log_context(sid)
+    activity_log = _build_flat_activity_context(sid)
     return templates.TemplateResponse("fragments/search_activity.html", {
         "request": request,
         **activity_log,

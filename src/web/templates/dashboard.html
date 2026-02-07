@@ -14,26 +14,47 @@
     <button class="btn btn-danger" type="submit">Stop Research</button>
 </form>
 {% else %}
-<form id="start-form"
-      {% if refinement_enabled %}
-      action="/api/research/refine" method="post"
-      {% else %}
-      hx-post="/api/research/start" hx-swap="none"
-      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 1000)"
-      {% endif %}>
-    <!-- Query row -->
+<form id="start-form">
+    <!-- Query row: [input] [Start Research] [Refine Query] -->
     <div class="research-form">
         <input type="text" name="query"
                placeholder="Enter your research query..." required>
         {% if refinement_enabled %}
-        <button class="btn btn-primary" type="submit">Refine Query</button>
+        <button class="btn btn-ghost" type="button" id="btn-start-direct">Start Research</button>
+        <button class="btn btn-primary" type="button" id="btn-refine">Refine Query</button>
         {% else %}
-        <button class="btn btn-primary" type="submit">Start Research</button>
+        <button class="btn btn-primary" type="button" id="btn-start-direct">Start Research</button>
         {% endif %}
     </div>
+
+    <!-- Inline refinement container (hidden initially) -->
     {% if refinement_enabled %}
-    <div class="refine-skip-row">
-        <a href="#" class="btn-ghost" id="skip-refine-link">Skip, start immediately</a>
+    <div id="refine-inline" style="display:none">
+        <!-- Loading spinner -->
+        <div id="refine-loading" class="refine-inline-loading" style="display:none">
+            <span class="refine-spinner"></span> Generating refinement questions...
+        </div>
+
+        <!-- Questions tabs -->
+        <div id="refine-questions" style="display:none">
+            <div class="refine-tab-bar" id="refine-tab-bar"></div>
+            <div id="refine-tab-content" class="refine-tab-content"></div>
+            <div class="refine-inline-actions">
+                <a href="#" class="refine-skip-link" id="refine-skip-link">Skip, start immediately</a>
+            </div>
+        </div>
+
+        <!-- Brief review (inline) -->
+        <div id="refine-brief-review" style="display:none">
+            <div class="refine-brief-section">
+                <label for="inline-brief-textarea"><strong>Enhanced Research Brief</strong> (editable):</label>
+                <textarea id="inline-brief-textarea" class="refine-brief-textarea" rows="10"></textarea>
+            </div>
+            <div class="refine-inline-actions">
+                <button type="button" class="btn btn-primary" id="btn-start-with-brief">Start Research</button>
+                <a href="#" class="refine-skip-link" id="brief-back-link">Back to Questions</a>
+            </div>
+        </div>
     </div>
     {% endif %}
 
@@ -198,45 +219,284 @@ var PRESETS = {
 
 function selectPreset(name) {
     document.getElementById('preset-input').value = name;
-    // Update active button
     document.querySelectorAll('.preset-btn').forEach(function(btn) {
         btn.classList.toggle('active', btn.dataset.preset === name);
     });
-    // Fill advanced fields
     var values = PRESETS[name];
     if (!values) return;
     var form = document.getElementById('start-form');
     for (var key in values) {
         var el = form.querySelector('input[name="' + key + '"][type="checkbox"]');
-        if (el) {
-            el.checked = !!values[key];
-            continue;
-        }
+        if (el) { el.checked = !!values[key]; continue; }
         el = form.querySelector('input[name="' + key + '"][type="number"]');
-        if (el) {
-            el.value = values[key];
-        }
+        if (el) { el.value = values[key]; }
     }
 }
 
-// Initialize with quick preset on page load
+// ── Helpers ──
+function _getFormData() {
+    var form = document.getElementById('start-form');
+    return new FormData(form);
+}
+
+function _startDirect() {
+    var form = document.getElementById('start-form');
+    var query = form.querySelector('input[name="query"]').value.trim();
+    if (!query) { form.querySelector('input[name="query"]').focus(); return; }
+    var fd = _getFormData();
+    fetch('/api/research/start', { method: 'POST', body: fd })
+        .then(function() { setTimeout(function(){ window.location.reload(); }, 1000); })
+        .catch(function(err) { alert('Failed to start: ' + err); });
+}
+
+// ── Inline refinement state ──
+var _refineToken = null;
+var _refineQuestions = [];
+var _refineAnswers = [];
+var _currentTab = 0;
+
+function _showTab(idx) {
+    _currentTab = idx;
+    var bar = document.getElementById('refine-tab-bar');
+    var content = document.getElementById('refine-tab-content');
+    if (!_refineQuestions.length) return;
+
+    // Update tab bar
+    bar.querySelectorAll('.refine-tab').forEach(function(t, i) {
+        t.classList.toggle('active', i === idx);
+    });
+
+    var q = _refineQuestions[idx];
+    var html = '<div class="refine-question"><h3>' + (idx + 1) + '. ' + _escHtml(q.question) + '</h3>';
+    html += '<div class="refine-options">';
+    for (var j = 0; j < q.options.length; j++) {
+        var checked = (_refineAnswers[idx] === q.options[j]) ? ' checked' : '';
+        html += '<label class="refine-option"><input type="radio" name="rq_' + idx + '" value="' + _escAttr(q.options[j]) + '"' + checked + '><span>' + _escHtml(q.options[j]) + '</span></label>';
+    }
+    var customVal = '';
+    var customChecked = '';
+    if (_refineAnswers[idx] && q.options.indexOf(_refineAnswers[idx]) === -1) {
+        customVal = _refineAnswers[idx];
+        customChecked = ' checked';
+    }
+    html += '<div class="refine-custom-input"><label class="refine-option"><input type="radio" name="rq_' + idx + '" value=""' + customChecked + '><span>Other:</span></label>';
+    html += '<input type="text" class="refine-custom-text" placeholder="Type your own answer..." value="' + _escAttr(customVal) + '"></div>';
+    html += '</div>';
+    // Next button (for custom text or reviewing)
+    html += '<div class="refine-next-row"><button type="button" class="btn btn-sm btn-ghost" id="btn-next-q">Next &rarr;</button></div>';
+    html += '</div>';
+    content.innerHTML = html;
+
+    function _advanceFromCustom() {
+        var ci = content.querySelector('.refine-custom-text');
+        var val = ci ? ci.value.trim() : '';
+        // If "Other" radio is selected, use custom text
+        var otherRadio = content.querySelector('.refine-custom-input input[type="radio"]');
+        if (otherRadio && otherRadio.checked && val) {
+            _refineAnswers[idx] = val;
+        }
+        // Only advance if this question has an answer
+        if (!_refineAnswers[idx]) return;
+        _updateTabs();
+        if (idx < _refineQuestions.length - 1) {
+            setTimeout(function() { _showTab(idx + 1); }, 200);
+        }
+    }
+
+    // Bind radio option events
+    content.querySelectorAll('input[type="radio"]').forEach(function(r) {
+        r.addEventListener('change', function() {
+            var val = this.value;
+            if (val) {
+                _refineAnswers[idx] = val;
+                _updateTabs();
+                if (idx < _refineQuestions.length - 1) {
+                    setTimeout(function() { _showTab(idx + 1); }, 300);
+                }
+            }
+        });
+    });
+
+    // Custom text input
+    var customInput = content.querySelector('.refine-custom-text');
+    if (customInput) {
+        customInput.addEventListener('focus', function() {
+            var radio = this.closest('.refine-custom-input').querySelector('input[type="radio"]');
+            if (radio) radio.checked = true;
+        });
+        customInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                _advanceFromCustom();
+            }
+        });
+    }
+
+    // Next button
+    var nextBtn = document.getElementById('btn-next-q');
+    if (nextBtn) {
+        nextBtn.addEventListener('click', _advanceFromCustom);
+    }
+}
+
+function _updateTabs() {
+    var bar = document.getElementById('refine-tab-bar');
+    bar.querySelectorAll('.refine-tab').forEach(function(t, i) {
+        var check = t.querySelector('.refine-tab-check');
+        if (_refineAnswers[i]) {
+            check.textContent = ' \u2713';
+        } else {
+            check.textContent = '';
+        }
+    });
+    // Auto-start refined research when all questions answered
+    var allAnswered = _refineAnswers.every(function(a) { return !!a; });
+    if (allAnswered && !_refineAutoStarted) {
+        _refineAutoStarted = true;
+        _startRefinedResearch();
+    }
+}
+
+var _refineAutoStarted = false;
+
+function _startRefinedResearch() {
+    var answers = _refineQuestions.map(function(q, i) {
+        return { question: q.question, answer: _refineAnswers[i] || '' };
+    });
+
+    // Show generating state
+    var questionsDiv = document.getElementById('refine-questions');
+    var loadingDiv = document.getElementById('refine-loading');
+    questionsDiv.style.display = 'none';
+    loadingDiv.querySelector('.refine-spinner + span') || loadingDiv;
+    loadingDiv.innerHTML = '<span class="refine-spinner"></span> Generating brief and starting research...';
+    loadingDiv.style.display = '';
+
+    fetch('/api/research/brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ token: _refineToken, answers: answers })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        // Show brief for review before final start
+        loadingDiv.style.display = 'none';
+        document.getElementById('inline-brief-textarea').value = data.brief || '';
+        document.getElementById('refine-brief-review').style.display = '';
+    })
+    .catch(function(err) {
+        loadingDiv.style.display = 'none';
+        questionsDiv.style.display = '';
+        _refineAutoStarted = false;
+        alert('Brief generation failed: ' + err);
+    });
+}
+
+function _buildTabBar() {
+    var bar = document.getElementById('refine-tab-bar');
+    bar.innerHTML = '';
+    for (var i = 0; i < _refineQuestions.length; i++) {
+        var tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'refine-tab' + (i === 0 ? ' active' : '');
+        tab.textContent = 'Q' + (i + 1);
+        var check = document.createElement('span');
+        check.className = 'refine-tab-check';
+        tab.appendChild(check);
+        tab.dataset.idx = i;
+        tab.addEventListener('click', function() { _showTab(parseInt(this.dataset.idx)); });
+        bar.appendChild(tab);
+    }
+}
+
+function _escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function _escAttr(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
 document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('start-form')) {
         selectPreset('quick');
     }
-    // "Skip, start immediately" link: submit query directly without refinement
-    var skipLink = document.getElementById('skip-refine-link');
-    if (skipLink) {
-        skipLink.addEventListener('click', function(e) {
-            e.preventDefault();
+
+    // "Start Research" (skip refinement)
+    var btnStart = document.getElementById('btn-start-direct');
+    if (btnStart) btnStart.addEventListener('click', _startDirect);
+
+    // "Refine Query" button
+    var btnRefine = document.getElementById('btn-refine');
+    if (btnRefine) {
+        btnRefine.addEventListener('click', function() {
             var form = document.getElementById('start-form');
             var query = form.querySelector('input[name="query"]').value.trim();
             if (!query) { form.querySelector('input[name="query"]').focus(); return; }
-            // POST to /api/research/start via fetch, then reload
-            var formData = new FormData(form);
-            fetch('/api/research/start', { method: 'POST', body: formData })
+
+            var container = document.getElementById('refine-inline');
+            var loading = document.getElementById('refine-loading');
+            container.style.display = '';
+            loading.style.display = '';
+            document.getElementById('refine-questions').style.display = 'none';
+            document.getElementById('refine-brief-review').style.display = 'none';
+            btnRefine.disabled = true;
+
+            // Build JSON body with form data
+            var body = { query: query, preset: document.getElementById('preset-input').value };
+            form.querySelectorAll('input[name]').forEach(function(el) {
+                if (el.name.indexOf('.') !== -1) {
+                    if (el.type === 'checkbox') { body[el.name] = el.checked ? 'true' : 'false'; }
+                    else if (el.type === 'number' && el.value) { body[el.name] = el.value; }
+                }
+            });
+
+            fetch('/api/research/refine', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify(body)
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                loading.style.display = 'none';
+                btnRefine.disabled = false;
+                _refineToken = data.token;
+                _refineQuestions = data.questions || [];
+                _refineAnswers = new Array(_refineQuestions.length).fill('');
+                _buildTabBar();
+                document.getElementById('refine-questions').style.display = '';
+                _showTab(0);
+            })
+            .catch(function(err) {
+                loading.style.display = 'none';
+                btnRefine.disabled = false;
+                alert('Refinement failed: ' + err);
+            });
+        });
+    }
+
+    // "Start Research" with brief
+    var btnStartBrief = document.getElementById('btn-start-with-brief');
+    if (btnStartBrief) {
+        btnStartBrief.addEventListener('click', function() {
+            var brief = document.getElementById('inline-brief-textarea').value;
+            var fd = new FormData();
+            fd.append('token', _refineToken);
+            fd.append('brief', brief);
+            fetch('/api/research/start-refined', { method: 'POST', body: fd, redirect: 'follow' })
                 .then(function() { setTimeout(function(){ window.location.reload(); }, 1000); })
                 .catch(function(err) { alert('Failed to start: ' + err); });
+        });
+    }
+
+    // "Skip, start immediately" link in questions view
+    var skipLink = document.getElementById('refine-skip-link');
+    if (skipLink) {
+        skipLink.addEventListener('click', function(e) { e.preventDefault(); _startDirect(); });
+    }
+
+    // "Back to Questions" link in brief view
+    var backLink = document.getElementById('brief-back-link');
+    if (backLink) {
+        backLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            document.getElementById('refine-brief-review').style.display = 'none';
+            document.getElementById('refine-questions').style.display = '';
         });
     }
 });
@@ -253,14 +513,6 @@ document.addEventListener('DOMContentLoaded', function() {
     <strong>Status:</strong> {{ session.status }}
 </div>
 {% endif %}
-
-<!-- Progress bar (polled) -->
-<div id="progress-area"
-     hx-get="/fragments/progress{{ sq }}"
-     hx-trigger="every 5s"
-     hx-swap="innerHTML">
-    {% include "fragments/progress.html" %}
-</div>
 
 <!-- Stats grid (polled) -->
 <div id="stats-area"
@@ -283,36 +535,6 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 {% endif %}
 
-<!-- Preserve <details> open/close state across HTMX swaps -->
-<script>
-(function() {
-    var openSet = {};
-
-    document.body.addEventListener('htmx:beforeSwap', function(e) {
-        if (!e.detail.target || e.detail.target.id !== 'activity-log-area') return;
-        // Save which details are open
-        openSet = {};
-        e.detail.target.querySelectorAll('details[data-id]').forEach(function(d) {
-            if (d.open) openSet[d.getAttribute('data-id')] = true;
-        });
-    });
-
-    document.body.addEventListener('htmx:afterSwap', function(e) {
-        if (!e.detail.target || e.detail.target.id !== 'activity-log-area') return;
-        // Restore open state
-        e.detail.target.querySelectorAll('details[data-id]').forEach(function(d) {
-            var id = d.getAttribute('data-id');
-            if (openSet[id]) {
-                d.open = true;
-            } else if (!id.startsWith('phase-')) {
-                // Non-phase items default closed; phases keep their server-side "open" attr
-                d.open = false;
-            }
-        });
-    });
-})();
-</script>
-
 <!-- Client-side elapsed timer (ticks between HTMX polls) -->
 <script>
 (function() {
@@ -331,10 +553,9 @@ document.addEventListener('DOMContentLoaded', function() {
             el.textContent = h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
         }, 1000);
     }
-    // Start on load and after each HTMX swap (server resets data-start)
     document.addEventListener('DOMContentLoaded', startTimer);
     document.body.addEventListener('htmx:afterSwap', function(e) {
-        if (e.detail.target && e.detail.target.id === 'progress-area') {
+        if (e.detail.target && e.detail.target.id === 'stats-area') {
             startTimer();
         }
     });

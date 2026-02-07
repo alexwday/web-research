@@ -475,58 +475,64 @@ class ReportCompiler:
             output_dir = ensure_directory(base_output_dir)
         report_name = self.config.output.report_name
 
-        for fmt in self.config.output.formats:
-            if fmt == "markdown":
-                path = self._compile_markdown(
-                    output_dir / f"{report_name}.md",
-                    query,
-                    chapters,
-                    sources,
-                    glossary_terms,
-                    executive_summary,
-                    conclusion,
-                    total_words
-                )
-                output_files["markdown"] = str(path)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            elif fmt == "html":
-                path = self._compile_html(
-                    output_dir / f"{report_name}.html",
-                    query,
-                    chapters,
-                    sources,
-                    glossary_terms,
-                    executive_summary,
-                    conclusion,
-                    total_words,
-                    duration_seconds
-                )
-                output_files["html"] = str(path)
+        formats = list(self.config.output.formats)
 
-            elif fmt == "pdf":
-                # PDF requires HTML first
-                html_path = self._compile_html(
-                    output_dir / f"{report_name}_temp.html",
-                    query,
-                    chapters,
-                    sources,
-                    glossary_terms,
-                    executive_summary,
-                    conclusion,
-                    total_words,
-                    duration_seconds
+        # Separate MD (independent) from HTML/PDF (PDF depends on HTML).
+        # Each format compiler gets its own slug tracker copy.
+        def _compile_md():
+            compiler_copy = ReportCompiler()
+            path = compiler_copy._compile_markdown(
+                output_dir / f"{report_name}.md",
+                query, chapters, sources, glossary_terms,
+                executive_summary, conclusion, total_words,
+            )
+            return "markdown", str(path)
+
+        def _compile_html_pdf():
+            results = {}
+            compiler_copy = ReportCompiler()
+            if "html" in formats or "pdf" in formats:
+                # Always generate HTML (PDF needs it too)
+                html_out = output_dir / f"{report_name}.html" if "html" in formats else output_dir / f"{report_name}_temp.html"
+                html_path = compiler_copy._compile_html(
+                    html_out, query, chapters, sources, glossary_terms,
+                    executive_summary, conclusion, total_words, duration_seconds,
                 )
-                pdf_path = self._html_to_pdf(
-                    html_path,
-                    output_dir / f"{report_name}.pdf"
-                )
-                if pdf_path:
-                    output_files["pdf"] = str(pdf_path)
-                    # Clean up temp HTML
-                    try:
-                        os.remove(html_path)
-                    except OSError:
-                        pass
+                if "html" in formats:
+                    results["html"] = str(html_path)
+
+                if "pdf" in formats:
+                    pdf_path = compiler_copy._html_to_pdf(
+                        html_path, output_dir / f"{report_name}.pdf"
+                    )
+                    if pdf_path:
+                        results["pdf"] = str(pdf_path)
+                    # Clean up temp HTML if we only needed it for PDF
+                    if "html" not in formats:
+                        try:
+                            os.remove(html_path)
+                        except OSError:
+                            pass
+            return results
+
+        with ThreadPoolExecutor(max_workers=2) as fmt_exec:
+            futures = []
+            if "markdown" in formats:
+                futures.append(fmt_exec.submit(_compile_md))
+            if "html" in formats or "pdf" in formats:
+                futures.append(fmt_exec.submit(_compile_html_pdf))
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if isinstance(result, tuple):
+                        output_files[result[0]] = result[1]
+                    elif isinstance(result, dict):
+                        output_files.update(result)
+                except Exception as e:
+                    logger.error(f"Format compilation failed: {e}")
         
         print_success(f"Report compiled: {', '.join(output_files.keys())}")
         return output_files

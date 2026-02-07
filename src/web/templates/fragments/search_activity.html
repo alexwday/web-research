@@ -1,59 +1,38 @@
-{% if phase_groups|length > 0 %}
-<div class="search-tree-totals">
+{% if feed_entries|length > 0 %}
+<div class="feed-totals">
     {{ total_queries }} searches | {{ total_results }} results | {{ unique_domains }} domains
 </div>
-<div class="search-tree">
-    {% for group in phase_groups %}
-    {# Level 1: Phase #}
-    <details class="st-phase" data-id="phase-{{ group.phase_key }}" open>
-        <summary class="st-phase-header">
-            <span class="st-phase-title">{{ group.phase_label }}</span>
-            <span class="st-count">{{ group.query_count }}q / {{ group.result_count }}r</span>
-        </summary>
-
-        {% for q in group.queries %}
-        {% if group.phase_key == 'compilation' %}
-        {# Compilation phase: simple action entries (no search results) #}
-        <div class="st-query st-action" data-id="q-{{ group.phase_key }}-{{ loop.index }}">
-            <div class="st-query-header">
-                <span class="st-query-text">{{ q.query_text }}</span>
-                {% if q.task_topic %}
-                <span class="st-query-meta">{{ q.task_topic[:42] }}{% if q.task_topic|length > 42 %}...{% endif %}</span>
-                {% endif %}
-            </div>
-        </div>
-        {% else %}
-        {# Level 2: Search query #}
-        <details class="st-query" data-id="q-{{ group.phase_key }}-{{ loop.index }}">
-            <summary class="st-query-header">
-                <span class="st-query-text">{{ q.query_text }}</span>
-                {% if q.task_id is not none %}
-                <span class="st-query-meta">Task {{ q.task_id }}{% if q.task_topic %}: {{ q.task_topic[:42] }}{% if q.task_topic|length > 42 %}...{% endif %}{% endif %}</span>
-                {% endif %}
-                <span class="st-count-sm">{{ q.results|length }}</span>
-            </summary>
-
-            {# Level 3: Results #}
-            {% for r in q.results %}
-            <div class="st-result">
-                <span class="st-dot {% if r.quality_score is not none %}{% if r.quality_score >= 0.8 %}dot-green{% elif r.quality_score >= 0.6 %}dot-yellow{% else %}dot-red{% endif %}{% endif %}"></span>
-                <a href="{{ r.url }}" target="_blank" rel="noopener" class="st-result-link" title="{{ r.url }}">{{ r.title[:60] }}{% if r.title|length > 60 %}...{% endif %}</a>
-                {% if r.quality_score is not none %}<span class="st-score">{{ "%.2f"|format(r.quality_score) }}</span>{% endif %}
-                {% if r.snippet %}
-                <details class="st-snippet-wrap" data-id="snip-{{ group.phase_key }}-{{ q.query_group }}-{{ loop.index }}">
-                    <summary class="st-snippet-btn">Show snippet</summary>
-                    <div class="st-snippet">{{ r.snippet[:600] }}{% if r.snippet|length > 600 %}...{% endif %}</div>
-                </details>
-                {% endif %}
-            </div>
-            {% endfor %}
-            {% if q.results|length == 0 %}
-            <div class="st-no-results">No results captured for this search yet.</div>
-            {% endif %}
-        </details>
+<div class="feed-list">
+    {% for entry in feed_entries %}
+    <div class="feed-entry feed-entry-{{ entry.type }}">
+        {% if entry.type == "search" %}
+        <span class="feed-icon feed-icon-search" title="Search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </span>
+        <span class="feed-text">Searched: <strong>{{ entry.text }}</strong></span>
+        {% if entry.task_id is not none %}
+        <span class="feed-pill">Task {{ entry.task_id }}</span>
         {% endif %}
-        {% endfor %}
-    </details>
+
+        {% elif entry.type == "result" %}
+        <span class="feed-icon">
+            <span class="feed-dot {% if entry.quality_score is not none %}{% if entry.quality_score >= 0.8 %}dot-green{% elif entry.quality_score >= 0.6 %}dot-yellow{% else %}dot-red{% endif %}{% endif %}"></span>
+        </span>
+        <span class="feed-text">Found: {% if entry.url %}<a href="{{ entry.url }}" target="_blank" rel="noopener">{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}</a>{% else %}{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}{% endif %}</span>
+        {% if entry.quality_score is not none %}
+        <span class="feed-pill feed-pill-score">{{ "%.2f"|format(entry.quality_score) }}</span>
+        {% endif %}
+
+        {% elif entry.type == "action" %}
+        <span class="feed-icon feed-icon-action" title="Action">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </span>
+        <span class="feed-text">{{ entry.text }}</span>
+        {% if entry.task_topic %}
+        <span class="feed-pill">{{ entry.task_topic[:30] }}{% if entry.task_topic|length > 30 %}...{% endif %}</span>
+        {% endif %}
+        {% endif %}
+    </div>
     {% endfor %}
 </div>
 {% else %}
