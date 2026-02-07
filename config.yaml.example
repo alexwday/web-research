@@ -11,7 +11,9 @@ llm:
     researcher: "gpt-5-mini"
     writer: "gpt-5-mini"
     editor: "gpt-5-mini"
-    discovery: "gpt-5-mini"
+    outline_designer: "gpt-5-mini"
+    synthesizer: "gpt-5-mini"
+    analyzer: "gpt-5-mini"
 
   # Token limits
   max_tokens:
@@ -19,7 +21,9 @@ llm:
     researcher: 16000
     writer: 16000
     editor: 16000
-    discovery: 4000
+    outline_designer: 8000
+    synthesizer: 16000
+    analyzer: 4000
 
   # Temperature settings (0.0 = deterministic, 1.0 = creative)
   temperature:
@@ -27,7 +31,9 @@ llm:
     researcher: 0.2
     writer: 0.4
     editor: 0.2
-    discovery: 0.2
+    outline_designer: 0.3
+    synthesizer: 0.3
+    analyzer: 0.2
 
 # =============================================================================
 # SEARCH & SCRAPING
@@ -42,13 +48,28 @@ search:
   # Search queries per task
   queries_per_task: 1
 
+  # Pre-planning search settings
+  pre_plan_queries: 5
+  pre_plan_max_results: 5
+
+  # Gap-fill search settings (0 = disabled)
+  gap_fill_queries: 0
+  gap_fill_max_results: 0
+
   # Include domains (optional, leave empty for all)
   include_domains: []
+
+  # Minimum Tavily relevance score (0-1, results below this are skipped)
+  min_tavily_score: 0.3
 
   # Exclude domains
   exclude_domains:
     - "pinterest.com"
     - "quora.com"
+    - "acronymattic.com"
+    - "abbreviations.com"
+    - "dokumen.pub"
+    - "dokumen.tips"
 
 scraping:
   # Max content length per page (characters)
@@ -64,55 +85,61 @@ scraping:
 # RESEARCH PARAMETERS
 # =============================================================================
 research:
-  # Minimum tasks to generate in initial plan
+  # Target number of report sections (hint to outline designer)
   min_initial_tasks: 3
 
-  # Maximum tasks (prevents infinite recursion)
-  max_total_tasks: 5
+  # Maximum total research tasks across all sections
+  max_total_tasks: 10
 
-  # Maximum recursion depth for sub-topics
+  # Maximum recursion depth for sub-tasks (0 = no sub-tasks)
   max_recursion_depth: 0
 
-  # Minimum word count per section
-  min_words_per_section: 100
+  # Research tasks per section
+  tasks_per_section: 2
 
-  # Maximum word count per section
-  max_words_per_section: 500
-
-  # Required citations per section
-  min_citations_per_section: 1
-
-  # Enable recursive task discovery
+  # Enable sub-task spawning during research
   enable_recursion: false
 
-  # Pause between research sessions (seconds)
-  session_delay: 1
+  # Pause between task batches (seconds)
+  task_delay: 1
 
   # Maximum runtime (hours) - 0 for unlimited
   max_runtime_hours: 1
 
-  # Maximum loops - 0 for unlimited
-  max_loops: 5
+  # Maximum research loop iterations (-1 = unlimited, 0 = skip)
+  max_loops: 10
 
 # =============================================================================
-# TASK DISCOVERY (gap analysis after sections are written)
+# GAP ANALYSIS (identifies missing research after initial tasks complete)
 # =============================================================================
-discovery:
-  # Enable/disable the discovery agent
+gap_analysis:
+  # Enable/disable the gap analysis phase
   enabled: false
 
-  # Run discovery every N completed tasks
-  frequency: 3
+  # Maximum new sections the gap analysis can create
+  max_new_sections: 3
 
-  # Maximum new tasks to suggest per discovery run
-  max_suggestions_per_run: 3
+  # Maximum total gap-fill tasks across all sections
+  max_gap_fill_tasks: 10
 
 # =============================================================================
-# EDITOR REWRITE PASS (cohesion editing before final compilation)
+# SECTION SYNTHESIS (merges research notes into polished section prose)
 # =============================================================================
-rewrite:
-  # Enable/disable the editor rewrite pass
-  enabled: false
+synthesis:
+  # Minimum words per synthesized section
+  min_words_per_section: 200
+
+  # Maximum words per synthesized section
+  max_words_per_section: 600
+
+  # Minimum citations per synthesized section
+  min_citations_per_section: 1
+
+  # Maximum concurrent synthesis operations
+  max_concurrent: 2
+
+  # Synthesis style: "confident" (no gap talk), "balanced", or "thorough"
+  style: "confident"
 
 # =============================================================================
 # OUTPUT SETTINGS
@@ -146,7 +173,7 @@ output:
 # =============================================================================
 quality:
   # Minimum source quality score (0-1)
-  min_source_quality: 0.5
+  min_source_quality: 0.55
 
 # =============================================================================
 # RATE LIMITING
