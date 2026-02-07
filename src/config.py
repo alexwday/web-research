@@ -28,6 +28,14 @@ class TaskStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class SectionStatus(str, Enum):
+    PLANNED = "planned"
+    RESEARCHING = "researching"
+    READY = "ready"
+    SYNTHESIZING = "synthesizing"
+    COMPLETE = "complete"
+
+
 # =============================================================================
 # DATABASE MODELS (Pydantic representations)
 # =============================================================================
@@ -37,6 +45,7 @@ class ResearchTask(BaseModel):
     id: Optional[int] = None
     parent_id: Optional[int] = None
     session_id: Optional[int] = None
+    section_id: Optional[int] = None
     topic: str
     description: str
     file_path: str
@@ -45,10 +54,30 @@ class ResearchTask(BaseModel):
     depth: int = 0  # Recursion depth
     word_count: int = 0
     citation_count: int = 0
+    is_gap_fill: bool = False
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
     retry_count: int = 0
+
+    class Config:
+        use_enum_values = True
+
+
+class ReportSection(BaseModel):
+    """Represents a section in the report outline"""
+    id: Optional[int] = None
+    session_id: Optional[int] = None
+    title: str
+    description: str = ""
+    position: int = 0
+    status: SectionStatus = SectionStatus.PLANNED
+    synthesized_content: Optional[str] = None
+    word_count: int = 0
+    citation_count: int = 0
+    is_gap_fill: bool = False
+    created_at: Optional[datetime] = None
+    synthesized_at: Optional[datetime] = None
 
     class Config:
         use_enum_values = True
@@ -108,7 +137,8 @@ class LLMModelsConfig(BaseModel):
     researcher: str = "gpt-4o-mini"
     writer: str = "gpt-4o"
     editor: str = "gpt-4o"
-    discovery: str = "gpt-4o"
+    outline_designer: str = "gpt-4o"
+    synthesizer: str = "gpt-4o"
     analyzer: str = "gpt-4o-mini"
 
 
@@ -117,7 +147,8 @@ class LLMMaxTokensConfig(BaseModel):
     researcher: int = 100_000
     writer: int = 100_000
     editor: int = 100_000
-    discovery: int = 100_000
+    outline_designer: int = 100_000
+    synthesizer: int = 100_000
     analyzer: int = 4000
 
 
@@ -126,7 +157,8 @@ class LLMTemperatureConfig(BaseModel):
     researcher: float = 0.2
     writer: float = 0.4
     editor: float = 0.2
-    discovery: float = 0.2
+    outline_designer: float = 0.3
+    synthesizer: float = 0.3
     analyzer: float = 0.2
 
 
@@ -140,12 +172,17 @@ class SearchConfig(BaseModel):
     depth: str = "advanced"
     max_results: int = 8
     queries_per_task: int = 3
-    pre_plan_queries: int = 3
+    pre_plan_queries: int = 5
     pre_plan_max_results: int = 8
     gap_fill_queries: int = 2
     gap_fill_max_results: int = 3
+    min_tavily_score: float = 0.3
     include_domains: List[str] = Field(default_factory=list)
-    exclude_domains: List[str] = Field(default_factory=lambda: ["pinterest.com", "quora.com"])
+    exclude_domains: List[str] = Field(default_factory=lambda: [
+        "pinterest.com", "quora.com",
+        "acronymattic.com", "abbreviations.com",
+        "dokumen.pub", "dokumen.tips",
+    ])
 
 
 class ScrapingConfig(BaseModel):
@@ -154,27 +191,25 @@ class ScrapingConfig(BaseModel):
     rotate_user_agents: bool = True
 
 
-class DiscoveryConfig(BaseModel):
+class GapAnalysisConfig(BaseModel):
     enabled: bool = True
-    frequency: int = 3  # run discovery every N completed tasks
-    max_suggestions_per_run: int = 3
+    max_new_sections: int = 3
+    max_gap_fill_tasks: int = 10
 
 
-class RewriteConfig(BaseModel):
-    enabled: bool = True
-
-
-class RestructureConfig(BaseModel):
-    enabled: bool = False
+class SynthesisConfig(BaseModel):
+    min_words_per_section: int = 500
+    max_words_per_section: int = 3000
+    min_citations_per_section: int = 2
+    max_concurrent: int = 2
+    style: str = "balanced"  # "confident", "balanced", or "thorough"
 
 
 class ResearchConfig(BaseModel):
     min_initial_tasks: int = 10
     max_total_tasks: int = 200
     max_recursion_depth: int = 1
-    min_words_per_section: int = 500
-    max_words_per_section: int = 3000
-    min_citations_per_section: int = 2
+    tasks_per_section: int = 3
     enable_recursion: bool = True
     task_delay: int = 2
     max_runtime_hours: int = 24
@@ -193,7 +228,7 @@ class OutputConfig(BaseModel):
 
 
 class QualityConfig(BaseModel):
-    min_source_quality: float = 0.5
+    min_source_quality: float = 0.55
 
 
 class RateLimitsConfig(BaseModel):
@@ -221,9 +256,8 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     scraping: ScrapingConfig = Field(default_factory=ScrapingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
-    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
-    rewrite: RewriteConfig = Field(default_factory=RewriteConfig)
-    restructure: RestructureConfig = Field(default_factory=RestructureConfig)
+    gap_analysis: GapAnalysisConfig = Field(default_factory=GapAnalysisConfig)
+    synthesis: SynthesisConfig = Field(default_factory=SynthesisConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     rate_limits: RateLimitsConfig = Field(default_factory=RateLimitsConfig)
@@ -263,10 +297,6 @@ class Settings(BaseSettings):
     editor_model_name: Optional[str] = Field(default=None, alias="EDITOR_MODEL_NAME")
     editor_model_input_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_INPUT_COST")
     editor_model_output_cost: Optional[float] = Field(default=None, alias="EDITOR_MODEL_OUTPUT_COST")
-
-    discovery_model_name: Optional[str] = Field(default=None, alias="DISCOVERY_MODEL_NAME")
-    discovery_model_input_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_INPUT_COST")
-    discovery_model_output_cost: Optional[float] = Field(default=None, alias="DISCOVERY_MODEL_OUTPUT_COST")
 
     analyzer_model_name: Optional[str] = Field(default=None, alias="ANALYZER_MODEL_NAME")
     analyzer_model_input_cost: Optional[float] = Field(default=None, alias="ANALYZER_MODEL_INPUT_COST")
@@ -337,8 +367,6 @@ def _apply_env_model_overrides(config: Config) -> None:
         config.llm.models.writer = settings.writer_model_name
     if settings.editor_model_name:
         config.llm.models.editor = settings.editor_model_name
-    if settings.discovery_model_name:
-        config.llm.models.discovery = settings.discovery_model_name
     if settings.analyzer_model_name:
         config.llm.models.analyzer = settings.analyzer_model_name
 
@@ -399,108 +427,124 @@ def apply_overrides(base: Config, overrides: dict) -> Config:
 RESEARCH_PRESETS = {
     "quick": {
         "label": "Quick",
-        "description": "Fast overview, 3\u20135 tasks, minimal depth",
+        "description": "Fast overview — ~3\u20134 sections, ~5 min, ~2k words",
         "overrides": {
+            # Outline: 3-4 sections × 2 tasks = 6-8 tasks
             "research.min_initial_tasks": 3,
-            "research.max_total_tasks": 5,
-            "research.min_words_per_section": 100,
-            "research.max_words_per_section": 500,
-            "research.min_citations_per_section": 1,
+            "research.max_total_tasks": 10,
+            "research.tasks_per_section": 2,
             "research.enable_recursion": False,
             "research.max_recursion_depth": 0,
             "research.max_runtime_hours": 1,
-            "research.max_loops": 5,
-            "research.max_concurrent_tasks": 1,
+            "research.max_loops": 10,
+            "research.max_concurrent_tasks": 2,
+            # Minimal searching
             "search.queries_per_task": 1,
             "search.max_results": 3,
             "search.pre_plan_queries": 2,
             "search.pre_plan_max_results": 5,
             "search.gap_fill_queries": 0,
             "search.gap_fill_max_results": 0,
-            "discovery.enabled": False,
-            "rewrite.enabled": False,
-            "restructure.enabled": False,
+            # No gap analysis
+            "gap_analysis.enabled": False,
+            # Short synthesis — confident tone (no gap talk)
+            "synthesis.min_words_per_section": 200,
+            "synthesis.max_words_per_section": 600,
+            "synthesis.min_citations_per_section": 1,
+            "synthesis.style": "confident",
         },
     },
     "standard": {
         "label": "Standard",
-        "description": "Balanced research, 8\u201315 tasks",
+        "description": "Balanced research — ~5\u20137 sections, ~20 min, ~6k words",
         "overrides": {
-            "research.min_initial_tasks": 8,
-            "research.max_total_tasks": 15,
-            "research.min_words_per_section": 500,
-            "research.max_words_per_section": 2000,
-            "research.min_citations_per_section": 3,
+            # Outline: 5-7 sections × 3 tasks = 15-21 tasks
+            "research.min_initial_tasks": 5,
+            "research.max_total_tasks": 25,
+            "research.tasks_per_section": 3,
             "research.enable_recursion": True,
             "research.max_recursion_depth": 1,
-            "research.max_runtime_hours": 6,
-            "research.max_loops": 15,
-            "research.max_concurrent_tasks": 2,
+            "research.max_runtime_hours": 2,
+            "research.max_loops": 25,
+            "research.max_concurrent_tasks": 3,
+            # Moderate searching
             "search.queries_per_task": 2,
             "search.max_results": 5,
-            "search.pre_plan_queries": 3,
+            "search.pre_plan_queries": 4,
             "search.pre_plan_max_results": 8,
             "search.gap_fill_queries": 1,
             "search.gap_fill_max_results": 3,
-            "discovery.enabled": True,
-            "discovery.frequency": 5,
-            "discovery.max_suggestions_per_run": 2,
-            "rewrite.enabled": True,
-            "restructure.enabled": False,
+            # Light gap analysis
+            "gap_analysis.enabled": True,
+            "gap_analysis.max_new_sections": 2,
+            "gap_analysis.max_gap_fill_tasks": 6,
+            # Medium synthesis
+            "synthesis.min_words_per_section": 400,
+            "synthesis.max_words_per_section": 1500,
+            "synthesis.min_citations_per_section": 2,
+            "synthesis.style": "balanced",
         },
     },
     "deep": {
         "label": "Deep",
-        "description": "Thorough analysis, 15\u201330 tasks, recursive",
+        "description": "Thorough analysis — ~8\u201312 sections, ~1\u20132 hr, ~20k words",
         "overrides": {
-            "research.min_initial_tasks": 15,
-            "research.max_total_tasks": 30,
-            "research.min_words_per_section": 1000,
-            "research.max_words_per_section": 3000,
-            "research.min_citations_per_section": 5,
+            # Outline: 8-12 sections × 4 tasks = 32-48 tasks
+            "research.min_initial_tasks": 8,
+            "research.max_total_tasks": 50,
+            "research.tasks_per_section": 4,
             "research.enable_recursion": True,
             "research.max_recursion_depth": 2,
-            "research.max_runtime_hours": 24,
-            "research.max_loops": 30,
+            "research.max_runtime_hours": 6,
+            "research.max_loops": 50,
             "research.max_concurrent_tasks": 3,
+            # Thorough searching
             "search.queries_per_task": 3,
             "search.max_results": 8,
-            "search.pre_plan_queries": 4,
+            "search.pre_plan_queries": 6,
             "search.pre_plan_max_results": 10,
             "search.gap_fill_queries": 2,
             "search.gap_fill_max_results": 5,
-            "discovery.enabled": True,
-            "discovery.frequency": 3,
-            "discovery.max_suggestions_per_run": 3,
-            "rewrite.enabled": True,
-            "restructure.enabled": True,
+            # Full gap analysis
+            "gap_analysis.enabled": True,
+            "gap_analysis.max_new_sections": 3,
+            "gap_analysis.max_gap_fill_tasks": 10,
+            # Detailed synthesis
+            "synthesis.min_words_per_section": 800,
+            "synthesis.max_words_per_section": 2500,
+            "synthesis.min_citations_per_section": 4,
+            "synthesis.style": "thorough",
         },
     },
     "exhaustive": {
         "label": "Exhaustive",
-        "description": "Maximum depth, 30\u201350 tasks, deep recursion",
+        "description": "Comprehensive — ~12\u201318 sections, ~3\u20136 hr, ~40k+ words",
         "overrides": {
-            "research.min_initial_tasks": 30,
-            "research.max_total_tasks": 50,
-            "research.min_words_per_section": 2000,
-            "research.max_words_per_section": 5000,
-            "research.min_citations_per_section": 8,
+            # Outline: 12-18 sections × 5 tasks = 60-90 tasks
+            "research.min_initial_tasks": 12,
+            "research.max_total_tasks": 100,
+            "research.tasks_per_section": 5,
             "research.enable_recursion": True,
             "research.max_recursion_depth": 3,
-            "research.max_runtime_hours": 48,
-            "research.max_loops": 50,
+            "research.max_runtime_hours": 24,
+            "research.max_loops": 100,
             "research.max_concurrent_tasks": 4,
+            # Aggressive searching
             "search.queries_per_task": 4,
             "search.max_results": 10,
-            "search.pre_plan_queries": 5,
+            "search.pre_plan_queries": 8,
             "search.pre_plan_max_results": 10,
             "search.gap_fill_queries": 3,
             "search.gap_fill_max_results": 5,
-            "discovery.enabled": True,
-            "discovery.frequency": 2,
-            "discovery.max_suggestions_per_run": 5,
-            "rewrite.enabled": True,
-            "restructure.enabled": True,
+            # Aggressive gap analysis
+            "gap_analysis.enabled": True,
+            "gap_analysis.max_new_sections": 5,
+            "gap_analysis.max_gap_fill_tasks": 15,
+            # Long-form synthesis
+            "synthesis.min_words_per_section": 1500,
+            "synthesis.max_words_per_section": 4000,
+            "synthesis.min_citations_per_section": 6,
+            "synthesis.style": "thorough",
         },
     },
 }

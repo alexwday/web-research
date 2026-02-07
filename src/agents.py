@@ -8,11 +8,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Tuple
 
-from .config import get_config, ResearchTask, TaskStatus, Source
+from .config import get_config, ResearchTask, TaskStatus, SectionStatus, ReportSection, Source
 from .llm_client import get_llm_client
 from .tools import (
-    web_search, extract_source_info,
-    truncate_to_tokens, generate_file_path
+    web_search, extract_source_info, is_blocked_source,
+    truncate_to_tokens, generate_file_path, read_file
 )
 from .database import get_database
 from .logger import get_logger, print_search, print_scrape
@@ -24,81 +24,69 @@ logger = get_logger(__name__)
 # PROMPTS
 # =============================================================================
 
-PLANNER_SYSTEM_PROMPT = """You are a Research Architect specializing in breaking down complex topics into comprehensive, in-depth research plans.
+PLANNER_SYSTEM_PROMPT = """You are a Research Architect specializing in deep pre-planning analysis for comprehensive research projects.
 
-Your task is to analyze a research query and create a detailed plan that, when executed, will result in a comprehensive report covering every important aspect of the topic in depth.
+Your task is to analyze a research query and the provided web search results to build a thorough understanding of the topic landscape. You are NOT creating research tasks — you are building a rich analytical foundation that will be used to design a report outline.
 
-You will be provided with preliminary web search results to ground your plan in real, current information. Use these results to:
+Use the preliminary web search results to:
 - Identify the key subtopics, themes, and angles that actually exist in the literature
 - Discover terminology, frameworks, or debates you might not have known about
-- Ensure your plan covers what is actually being discussed, not just what you assume
-
-PRIORITY RULES (tasks are executed from highest to lowest priority):
-- Priority 9-10: Introduction/Overview, Historical Background, Core Definitions (research first to build foundation)
-- Priority 7-8: Main body content, detailed analysis, current state
-- Priority 5-6: Applications, case studies, specific examples
-- Priority 3-4: Edge cases, alternative perspectives, limitations
-- Priority 1-2: Future Directions, Conclusion/Synthesis (research LAST after all body content exists)
-
-Note: The system will enforce these ordering rules automatically, but setting correct priorities helps produce a coherent report.
-
-GUIDELINES:
-1. Break the topic into logical chapters/sections following academic structure
-2. Each task should be specific enough to research in a single focused session
-3. Include tasks for edge cases, controversies, and alternative perspectives
-4. Prioritize foundational knowledge before advanced topics
-5. Aim for {min_tasks} to {max_tasks} tasks
-6. Each task must be a RESEARCH topic — not a meta-task like "Write introduction"
-7. Ground your plan in the preliminary search results — do not ignore them
+- Map the landscape of what is actually being discussed about this topic
+- Identify areas of consensus, controversy, and uncertainty
+- Note important entities, organizations, products, or frameworks
 
 OUTPUT FORMAT:
-Output ONLY a valid JSON object with a "tasks" array. Each task object must have:
-- "topic": Brief title (max 100 chars)
-- "description": Detailed research instructions (2-4 sentences explaining exactly what to investigate)
-- "priority": 1-10 (10 = research first, 1 = research last)
-
-Example:
+Provide a structured analysis as a JSON object:
 {{
-  "tasks": [
-    {{
-      "topic": "Historical Origins of Machine Learning",
-      "description": "Research the early history of machine learning from 1950s-1980s. Focus on key papers, pioneering researchers like Alan Turing, Arthur Samuel, and Frank Rosenblatt. Document the evolution from simple perceptrons to early neural networks.",
-      "priority": 9
-    }}
-  ]
+  "topic_landscape": "2-3 paragraph overview of what you learned about this topic from the sources",
+  "key_themes": ["theme 1", "theme 2", ...],
+  "key_entities": ["entity 1", "entity 2", ...],
+  "controversies": ["controversy 1", ...],
+  "knowledge_gaps": ["gap 1", "gap 2", ...],
+  "recommended_scope": "1-2 sentences on what a comprehensive report should cover"
 }}"""
 
 
-RESEARCHER_SYSTEM_PROMPT = """You are a Deep Research Specialist writing a section for an academic report.
+RESEARCH_NOTES_SYSTEM_PROMPT = """You are a Deep Research Specialist gathering findings for a research report section.
 
-WRITING GUIDELINES:
-1. Aim for {min_words}-{max_words} words. Prioritize specific facts, data, and analysis over general statements. Every paragraph should contain at least one concrete claim with a citation. Cut filler.
-2. Include specific facts, figures, dates, and direct quotes from sources
-3. Structure with subheadings (### for main subsections, #### for sub-subsections). Do NOT write a top-level ## heading — the section title is added automatically.
-4. Define technical terms when first introduced
-5. Address multiple perspectives and controversies if they exist
-6. Do not write a general introduction or conclusion for this section — jump directly into the substance
-7. NEVER add disclaimers about sources being unavailable, training data cutoffs, or limitations of your knowledge. You HAVE source material — use it. Do not write "Note on sources" paragraphs.
+Your job is to produce STRUCTURED RESEARCH NOTES — not polished prose. These notes will later be synthesized into a cohesive section by another agent. Focus on extracting and organizing information from your sources.
+
+OUTPUT STRUCTURE:
+Organize your findings under these headings:
+
+### Key Findings
+- Bullet points of the most important facts, claims, and insights, each with a citation [N]
+- Be specific: include numbers, dates, names, percentages
+
+### Data & Statistics
+- Any quantitative data, figures, metrics, or measurements found in sources
+- Include the context for each data point [N]
+
+### Notable Quotes
+- Direct quotes that are particularly insightful or authoritative
+- "Quoted text here" [N]
+
+### Conflicting Viewpoints
+- Areas where sources disagree or present different perspectives
+- Note which sources support which position [N]
+
+### Gaps / Follow-up Needed
+- Information that was NOT found but would be valuable
+- Questions raised by the research that remain unanswered
 
 CITATION FORMAT:
 - Sources are numbered in the order listed under "Source Material" below
 - Cite using numbered references: [1], [2], etc.
 - Source 1 = first source, Source 2 = second source, and so on
-- Direct quotes: "quoted text" [3]
-- Minimum {min_citations} citations required
 - You MUST cite from the provided sources. Do not invent citations.
-- NEVER use a citation number higher than the number of sources provided. If 3 sources are listed, only [1], [2], [3] are valid.
-- If the source material section says "WARNING" or contains no actual sources, write WITHOUT any [N] citation markers at all. Do not fabricate references.
+- NEVER use a citation number higher than the number of sources provided.
+- If the source material section says "WARNING" or contains no actual sources, write WITHOUT any [N] citation markers. Do not fabricate references.
 
 NOTE: Source content may be truncated. Do not assume you have the complete text of any source.
-
-OUTPUT FORMAT:
-Write the section in Markdown format.
 
 ABOUT NEW TASKS:
 - Most research tasks should NOT spawn new tasks — only do so if something critical was discovered that cannot be covered here
 - Never suggest more than 1 new task
-- Never suggest tasks that overlap with existing sections listed in the prompt
 
 If you discover something critical, include at the END of your response:
 
@@ -142,143 +130,153 @@ Requirements:
 - Professional academic prose; no bullet lists"""
 
 
-DISCOVERY_SYSTEM_PROMPT = """You are a Research Gap Analyst. Your sole job is to review completed research sections against the original query and identify critical gaps that deserve their own dedicated section.
+OUTLINE_DESIGNER_SYSTEM_PROMPT = """You are a Report Architect. Given a research query and a deep pre-planning analysis, design the sections of a comprehensive research report.
 
-You will receive:
-- The original research query
-- The full list of existing tasks (completed and pending)
-- Summaries of completed sections
+Each section should represent a coherent chapter that covers a specific aspect of the topic. The sections will later have focused research tasks created for each one.
 
-Your task:
-1. Compare what has been written against what a comprehensive report on this topic SHOULD cover
-2. Identify important sub-topics, perspectives, or angles that are missing
-3. Do NOT suggest topics that overlap with existing or pending tasks
-4. Do NOT suggest meta-tasks (e.g. "Write introduction") — only research topics
-5. Prioritize gaps that would significantly improve report comprehensiveness
+GUIDELINES:
+1. Design approximately {target_sections} sections (no more than {max_sections})
+2. Order sections for optimal reading flow (background first, then core content, then advanced/future topics)
+3. Each section needs a clear, specific title and a description of what it should cover
+4. Do NOT include "Executive Summary" or "Conclusion" — these are generated separately
+5. Sections should be non-overlapping and collectively exhaustive
+6. Ground your outline in the pre-planning analysis — reflect what was actually discovered
 
 OUTPUT FORMAT:
 Output ONLY a valid JSON object:
 {{
-  "suggestions": [
+  "sections": [
     {{
-      "topic": "Brief title (max 100 chars)",
-      "description": "2-3 sentences explaining what to investigate and why it matters",
-      "priority": 3
-    }}
-  ]
-}}
-
-If no significant gaps exist, return: {{"suggestions": []}}
-
-Priority guidelines:
-- 7-8: Critical gap — report is incomplete without this
-- 5-6: Important — adds significant value
-- 3-4: Nice to have — deepens coverage but not essential"""
-
-
-REORDER_SYSTEM_PROMPT = """You are a Report Structure Editor. Your job is to determine the optimal reading order for the sections of a research report.
-
-Rules:
-- Introduction/Overview/Background sections should come FIRST
-- Core concepts and definitions should come early
-- Main body content should flow logically from general to specific
-- Case studies and applications should come after the concepts they illustrate
-- Comparative analysis and alternative perspectives should come after the things they compare
-- Conclusion/Future Directions/Synthesis sections should come LAST
-- Adjacent sections should have natural thematic connections
-
-OUTPUT FORMAT:
-Output ONLY a valid JSON object with an "order" array containing the section topics in optimal reading order:
-{{
-  "order": [
-    "First Section Topic",
-    "Second Section Topic",
-    ...
-  ]
-}}
-
-Include ALL sections — do not drop any."""
-
-
-REWRITE_SYSTEM_PROMPT = """You are a Report Editor performing a cohesion rewrite pass. You are rewriting ONE section of a larger research report to improve flow, reduce repetition, and strengthen transitions.
-
-You will receive:
-- The full table of contents (so you know the report structure)
-- Summaries of the sections that come BEFORE this one
-- The topics of sections that come AFTER this one
-- The original content of THIS section
-
-Your task:
-1. Rewrite this section so it reads naturally in context:
-   - Remove content that repeats what prior sections already covered (reference them instead: "As discussed in the section on X...")
-   - Add brief forward references where helpful ("This will be explored further in the section on Y")
-   - Ensure terminology is consistent with prior sections
-   - Smooth the opening so it transitions naturally from the previous section
-2. Preserve ALL substantive content, facts, data, and citations — do not remove information, only restructure and rephrase
-3. Keep all [N] citation references exactly as they are — do not renumber or remove them
-4. Maintain the same markdown heading structure (### and ####)
-5. Keep approximately the same length — this is a cohesion edit, not a summary
-
-OUTPUT: The rewritten section content in Markdown format. Do NOT include the section title (## heading) — only the body content."""
-
-
-RESTRUCTURE_GROUPING_SYSTEM_PROMPT = """You are a Report Structure Architect. Your job is to organize a flat list of research sections into a hierarchical chapter structure with 2-7 primary topic groups.
-
-You will receive:
-- The original research query
-- A list of section topics with brief summaries
-
-Your task:
-1. Identify 2-7 primary topic groups (chapters) that naturally cluster the sections
-2. Assign every section to exactly one group
-3. Give each group a clear, descriptive title
-4. Give each section a concise subtopic title (may differ from the original topic to better fit the group context)
-
-Rules:
-- Every original section topic MUST appear exactly once in the output
-- Groups should be ordered for optimal reading flow (general/background first, specific/advanced later)
-- Subtopic titles should be concise (max 80 chars) and clearly distinguish sections within the same group
-- If sections don't cluster naturally, it's fine to have a group with only one section
-
-OUTPUT FORMAT:
-Output ONLY a valid JSON object:
-{{
-  "groups": [
-    {{
-      "title": "Primary Topic Title",
-      "sections": [
-        {{"original_topic": "exact original section topic", "subtopic_title": "new concise title"}}
-      ]
+      "title": "Section Title",
+      "description": "2-3 sentences describing what this section should cover, including specific angles and subtopics",
+      "position": 1
     }}
   ]
 }}"""
 
 
-RESTRUCTURE_REWRITE_SYSTEM_PROMPT = """You are a Report Editor performing a contextual rewrite of one section within a topic group. You are rewriting this section so it reads naturally as part of its group chapter.
+SECTION_TASK_PLANNER_SYSTEM_PROMPT = """You are a Research Task Planner. Given one section of a report outline and the full outline for context, generate focused research tasks for that section.
+
+Each task is an investigation unit — it should focus on gathering specific information, not on writing. The research notes from these tasks will later be synthesized into the section's prose.
+
+GUIDELINES:
+1. Generate {tasks_per_section} tasks for this section
+2. Each task should target a different angle, subtopic, or source type within the section
+3. Tasks should be specific enough to execute with 1-3 search queries each
+4. Avoid overlap between tasks — each should contribute unique information
+5. Consider the full report outline to avoid duplicating work done in other sections
+
+OUTPUT FORMAT:
+Output ONLY a valid JSON object:
+{{
+  "tasks": [
+    {{
+      "topic": "Brief, specific research focus (max 100 chars)",
+      "description": "2-3 sentences explaining exactly what to investigate and what kind of information to find",
+      "priority": 5
+    }}
+  ]
+}}"""
+
+
+PIPELINE_GAP_ANALYSIS_SYSTEM_PROMPT = """You are a Research Gap Analyst performing a comprehensive post-research review. Your job is to identify what's missing from the research at TWO levels:
+
+1. **Per-section gaps**: For existing sections, identify specific data, perspectives, or evidence that the research tasks did not adequately cover.
+2. **Cross-section gaps**: Identify entirely new sections that should be added to the report.
 
 You will receive:
 - The original research query
-- The full hierarchical report structure (all groups and their subtopics, so you understand the big picture)
-- The group (chapter) title this section belongs to
-- The subtopic title assigned to this section
-- Summaries of the subtopics that PRECEDE this one in the group (so you can avoid repetition and build transitions)
-- The topics of subtopics that FOLLOW this one in the group (so you can add forward references)
-- A summary of all other groups in the report (for broader context)
-- The original content of this section
+- The report outline (all sections with descriptions)
+- Summaries of all research notes gathered per section
 
-Your task:
-1. Rewrite this section so it reads naturally within its group:
-   - Remove content that repeats what preceding subtopics already covered (reference them instead: "As discussed above in the subtopic on X...")
-   - Add brief forward references where helpful ("This will be explored further in the subtopic on Y")
-   - Avoid repeating information covered by siblings in the same group
-   - Ensure terminology is consistent with the group context
-   - Smooth the opening to transition naturally from the previous subtopic (or introduce the group theme if this is the first subtopic)
-2. Preserve ALL substantive content, facts, data, and citations — do not remove information, only restructure and rephrase
-3. Keep all [N] citation references exactly as they are — do not renumber or remove them
-4. Maintain markdown heading structure (### and ####)
-5. Keep approximately the same length — this is a contextual edit, not a summary
+ANALYSIS GUIDELINES:
+- Compare gathered material against each section's description
+- Look for sections where research is thin (few findings, few citations)
+- Identify perspectives or angles that no section covers
+- Consider whether the report would leave important questions unanswered
+- Be selective: only suggest gaps that would SIGNIFICANTLY improve the report
 
-OUTPUT: The rewritten section content in Markdown format. Do NOT include any heading — only the body content."""
+OUTPUT FORMAT:
+Output ONLY a valid JSON object:
+{{
+  "section_gaps": [
+    {{
+      "section_title": "exact title of existing section",
+      "gap_description": "what is missing and why it matters",
+      "suggested_tasks": [
+        {{
+          "topic": "specific research focus",
+          "description": "what to investigate",
+          "priority": 6
+        }}
+      ]
+    }}
+  ],
+  "new_sections": [
+    {{
+      "title": "New Section Title",
+      "description": "What this section should cover and why it's needed",
+      "position": 99,
+      "suggested_tasks": [
+        {{
+          "topic": "specific research focus",
+          "description": "what to investigate",
+          "priority": 5
+        }}
+      ]
+    }}
+  ]
+}}
+
+If no significant gaps exist, return: {{"section_gaps": [], "new_sections": []}}"""
+
+
+SECTION_SYNTHESIS_SYSTEM_PROMPT = """You are a Research Report Writer. Your job is to synthesize research notes from multiple investigation tasks into polished, cohesive prose for one section of a larger report.
+
+You will receive:
+- The section title and description
+- Research notes from all tasks for this section (with citations)
+- The full report outline (for context on how this section fits)
+- Brief summaries of adjacent sections (for transitions)
+
+WRITING GUIDELINES:
+1. Aim for {min_words}-{max_words} words
+2. Synthesize findings across all research notes — do not just concatenate them
+3. Structure with subheadings (### for main subsections, #### for sub-subsections). Do NOT write a top-level ## heading — the section title is added automatically.
+4. Include specific facts, figures, dates, and direct quotes from the research notes
+5. Address multiple perspectives and controversies found in the notes
+6. Ensure smooth flow: each paragraph should build on the previous one
+7. Do not write a general introduction or conclusion for this section
+8. Reference adjacent sections where helpful ("As explored in [adjacent section title]...")
+9. Minimum {min_citations} citations required, using the same [N] format from the research notes
+10. NEVER add disclaimers about sources or knowledge limitations
+
+STYLE GUIDANCE:
+{style_guidance}
+
+CITATION FORMAT:
+- Preserve the [N] citation numbers from the research notes exactly as they appear
+- These numbers will be remapped to global numbering during compilation
+- Only use citation numbers that appear in the research notes provided
+
+OUTPUT: Write the section in Markdown format."""
+
+# Style guidance text mapped from config synthesis.style
+_SYNTHESIS_STYLE_GUIDANCE = {
+    "confident": (
+        "Present findings authoritatively. Do NOT discuss gaps, limitations, "
+        "missing data, or suggest follow-up research. Write as a finished "
+        "report, not a research proposal."
+    ),
+    "balanced": (
+        "You may briefly note 1-2 significant limitations where directly "
+        "relevant, but focus primarily on presenting findings."
+    ),
+    "thorough": (
+        "Where relevant, note important evidentiary gaps and suggest specific "
+        "follow-up, but keep gap discussion proportional to findings."
+    ),
+}
 
 
 PRE_PLAN_ANALYSIS_SYSTEM_PROMPT = """You are a Research Analyst. Analyze the provided web page content and extract structured insights relevant to the research query.
@@ -375,84 +373,53 @@ class PlannerAgent:
     def config(self):
         return get_config()
     
-    def create_plan(self, query: str, session_id: int) -> List[ResearchTask]:
+    def run_pre_planning(self, query: str, session_id: int) -> str:
         """
-        Analyze the query and create a comprehensive research plan.
-        Runs preliminary web searches first to ground the plan in real data.
+        Run deep pre-planning: web searches + analysis to build topic understanding.
+        Returns a context string for use by the outline designer.
         """
-        logger.info(f"Creating research plan for: {query[:100]}...")
+        logger.info(f"Running deep pre-planning for: {query[:100]}...")
 
-        # Pre-search: gather web context so the planner is informed
+        # Pre-search: gather web context
         search_context = self._pre_search(query, session_id=session_id)
 
-        # Format the system prompt with config values
-        max_initial = self.config.research.max_total_tasks
-        min_initial = min(self.config.research.min_initial_tasks, max_initial)
-        system = PLANNER_SYSTEM_PROMPT.format(
-            min_tasks=min_initial,
-            max_tasks=max_initial
-        )
+        if not search_context:
+            logger.warning("Pre-planning produced no search context")
+            return ""
 
-        search_block = ""
-        if search_context:
-            search_block = f"""
+        # Run structured analysis on the gathered context
+        system = PLANNER_SYSTEM_PROMPT
 
-## Pre-Planning Research Analysis
-The following analysis was gathered from real web sources to help you understand the current landscape of this topic. Use the discovered entities, subtopics, and gaps to create highly specific, targeted research tasks.
+        prompt = f"""Analyze the following research topic and gathered source material to build a deep understanding of the topic landscape.
 
+## Research Query
+{query}
+
+## Pre-Planning Research
 {search_context}
 
 ---
-"""
-
-        prompt = f"""Create a comprehensive research plan for the following query:
-
-{query}
-{search_block}
-Create an exhaustive plan covering all important aspects of this topic. The goal is to produce a thorough, in-depth report. Favor deep coverage of each aspect over surface-level breadth."""
+Provide a thorough analysis of the topic landscape based on these sources."""
 
         try:
-            pending_tasks = None
+            response = self.client.complete(
+                prompt=prompt,
+                system=system,
+                max_tokens=self.config.llm.max_tokens.planner,
+                temperature=self.config.llm.temperature.planner,
+                json_mode=True,
+                model=self.config.llm.models.planner
+            )
 
-            # Try up to 2 times if the planner returns too few tasks
-            for attempt in range(2):
-                extra_instruction = ""
-                if attempt > 0:
-                    extra_instruction = (
-                        f"\n\nIMPORTANT: Your previous plan only had "
-                        f"{len(pending_tasks)} tasks, but this research "
-                        f"requires at least {min_initial}. Generate MORE "
-                        f"tasks with finer-grained subtopics.\n"
-                    )
-
-                response = self.client.complete(
-                    prompt=prompt + extra_instruction,
-                    system=system,
-                    max_tokens=self.config.llm.max_tokens.planner,
-                    temperature=self.config.llm.temperature.planner,
-                    json_mode=True,
-                    model=self.config.llm.models.planner
-                )
-
-                pending_tasks = self._parse_plan_json(response)
-
-                if len(pending_tasks) >= min_initial:
-                    break
-
-                logger.warning(
-                    f"Planner returned {len(pending_tasks)} tasks, "
-                    f"need {min_initial}+. Retrying with stronger prompt..."
-                )
-
-            # Save to database
-            tasks = self._save_plan_tasks(pending_tasks, session_id)
-
-            logger.info(f"Created plan with {len(tasks)} tasks")
-            return tasks
+            # Return the raw search context plus the structured analysis
+            # so the outline designer has both rich source data and synthesis
+            result = f"## Raw Source Analysis\n{search_context}\n\n## Structured Analysis\n{response}"
+            logger.info("Pre-planning analysis complete")
+            return result
 
         except Exception as e:
-            logger.error(f"Failed to create plan: {e}")
-            raise
+            logger.warning(f"Pre-planning analysis failed: {e}; returning raw context")
+            return search_context
 
     def _generate_planning_queries(self, query: str, num_queries: int = None) -> List[str]:
         """Use the LLM to produce diverse, concise search queries for pre-planning."""
@@ -475,7 +442,7 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
                         "type": "array",
                         "items": {"type": "string"},
                         "minItems": 1,
-                        "maxItems": num_queries + 2,
+                        "maxItems": num_queries,
                     }
                 },
                 "required": ["queries"],
@@ -532,6 +499,19 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
         url = result.get("url", "")
         if not url:
             return None
+
+        # Skip blocked sources before scraping
+        if is_blocked_source(url):
+            logger.info(f"[pre-plan] Blocked source: {url}")
+            return None
+
+        # Skip results with very low Tavily relevance score
+        min_tavily = getattr(self.config.search, 'min_tavily_score', 0.3)
+        tavily_score = result.get('score', 1.0)
+        if tavily_score < min_tavily:
+            logger.info(f"[pre-plan] Low Tavily score ({tavily_score:.2f}): {url}")
+            return None
+
         try:
             print_scrape(url)
             source = extract_source_info(url, result)
@@ -737,71 +717,17 @@ Create an exhaustive plan covering all important aspects of this topic. The goal
 
         return summary + "\n\n".join(parts)
     
-    def _parse_plan_json(self, response: str) -> List[dict]:
-        """Parse the planner's JSON response into a list of task dicts (no DB writes)."""
+    @staticmethod
+    def _parse_json_response(response: str) -> dict:
+        """Parse a JSON response, handling common LLM quirks."""
         try:
-            data = json.loads(response)
-
-            # Handle various response formats
-            if isinstance(data, list):
-                task_list = data
-            elif "tasks" in data:
-                task_list = data["tasks"]
-            elif "plan" in data:
-                task_list = data["plan"]
-            else:
-                for value in data.values():
-                    if isinstance(value, list):
-                        task_list = value
-                        break
-                else:
-                    raise ValueError("Could not find task list in response")
-
-            max_tasks = self.config.research.max_total_tasks
-            return task_list[:max_tasks]
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse plan JSON: {e}")
-            logger.debug(f"Response was: {response[:500]}")
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # Try extracting from fenced block
+            m = re.search(r'```(?:json)?\s*\n?(.*?)\s*```', response, re.DOTALL)
+            if m:
+                return json.loads(m.group(1))
             raise
-
-    def _save_plan_tasks(self, task_list: List[dict], session_id: int) -> List[ResearchTask]:
-        """Apply priority rules, create ResearchTask objects, and insert into DB."""
-        output_dir = self.config.output.directory
-
-        # Structural keywords — only unambiguous terms to avoid misclassifying
-        # content topics (e.g. "Protein Synthesis" should NOT match "synthesis")
-        conclusion_keywords = ['conclusion', 'closing remarks', 'wrap-up', 'recap', 'final thoughts', 'key takeaways']
-        future_keywords = ['future', 'outlook', 'prediction', 'forecast', 'next steps']
-        intro_keywords = ['introduction', 'overview', 'background', 'foundation', 'basics', 'fundamentals']
-
-        pending_tasks = []
-        for i, item in enumerate(task_list):
-            topic = item.get("topic", f"Task {i+1}")
-            topic_lower = topic.lower()
-            priority = item.get("priority", 5)
-
-            # Enforce priority rules — use startswith for conclusion/future
-            # to avoid false positives on content topics
-            if any(topic_lower.startswith(kw) for kw in conclusion_keywords):
-                priority = 1
-            elif any(topic_lower.startswith(kw) for kw in future_keywords):
-                priority = 2
-            elif any(kw in topic_lower for kw in intro_keywords) and priority < 9:
-                priority = max(priority, 9)
-
-            pending_tasks.append(ResearchTask(
-                topic=topic,
-                description=item.get("description", ""),
-                file_path=generate_file_path(topic, output_dir, i + 1),
-                priority=priority,
-                depth=0,
-                status=TaskStatus.PENDING
-            ))
-
-        tasks = self.db.add_tasks_bulk(pending_tasks, session_id)
-        self.db.update_session(session_id, total_tasks=len(tasks))
-        return tasks
 
 
 # =============================================================================
@@ -1167,10 +1093,22 @@ class ResearcherAgent:
         context_parts = []
         sources_added = 0
         max_sources = self.config.search.max_results
+        min_tavily = getattr(self.config.search, 'min_tavily_score', 0.3)
 
         for result in all_results[:max_sources * 2]:  # Check more than needed
             url = result.get('url', '')
             if not url:
+                continue
+
+            # Skip blocked sources before scraping
+            if is_blocked_source(url):
+                logger.info(f"Blocked source (skipping): {url}")
+                continue
+
+            # Skip results with very low Tavily relevance score
+            tavily_score = result.get('score', 1.0)
+            if tavily_score < min_tavily:
+                logger.info(f"Low Tavily score ({tavily_score:.2f}), skipping: {url}")
                 continue
 
             try:
@@ -1306,11 +1244,24 @@ class ResearcherAgent:
         # Scrape and build context
         context_parts = []
         sources_added = 0
+        min_tavily = getattr(self.config.search, 'min_tavily_score', 0.3)
 
         for result in all_results[: max_results * 2]:
             url = result.get("url", "")
             if not url:
                 continue
+
+            # Skip blocked sources
+            if is_blocked_source(url):
+                logger.info(f"Gap-fill blocked source: {url}")
+                continue
+
+            # Skip low Tavily relevance
+            tavily_score = result.get('score', 1.0)
+            if tavily_score < min_tavily:
+                logger.info(f"Gap-fill low Tavily score ({tavily_score:.2f}): {url}")
+                continue
+
             try:
                 print_scrape(url)
                 source = extract_source_info(url, result)
@@ -1353,17 +1304,24 @@ class ResearcherAgent:
         other_sections: List[str] = None,
         session_id: int = None
     ) -> Tuple[str, List[Dict], List[Dict]]:
-        """Synthesize research into written content"""
+        """Produce research notes from gathered sources"""
 
         # Truncate context if too long
         max_context_tokens = 50000  # Leave room for prompt and response
         search_context = truncate_to_tokens(search_context, max_context_tokens)
 
-        system = RESEARCHER_SYSTEM_PROMPT.format(
-            min_words=self.config.research.min_words_per_section,
-            max_words=self.config.research.max_words_per_section,
-            min_citations=self.config.research.min_citations_per_section
-        )
+        system = RESEARCH_NOTES_SYSTEM_PROMPT
+
+        # For confident style, replace gap analysis section with a skip instruction
+        style = getattr(self.config.synthesis, 'style', 'balanced')
+        if style == 'confident':
+            system = system.replace(
+                "### Gaps / Follow-up Needed\n"
+                "- Information that was NOT found but would be valuable\n"
+                "- Questions raised by the research that remain unanswered",
+                "### Gaps / Follow-up Needed\n"
+                "Skip gap analysis — focus only on findings from available sources."
+            )
 
         # Build other-sections context
         other_sections_text = ""
@@ -1372,9 +1330,9 @@ class ResearcherAgent:
             other_sections_text += "\n".join(f"- {s}" for s in other_sections)
             other_sections_text += "\n"
 
-        prompt = f"""Write a section for a research report on: **{overall_query}**
+        prompt = f"""Gather research notes for a report on: **{overall_query}**
 
-## This Section: {task.topic}
+## This Task: {task.topic}
 
 ## Research Instructions:
 {task.description}
@@ -1384,10 +1342,10 @@ class ResearcherAgent:
 
 ---
 
-Write this section assuming the reader will read the full report. Do not write a general
-introduction or conclusion for this section — jump directly into the substance.
+Extract and organize findings from the source material into structured research notes.
+Focus on facts, data, and specific claims with citations.
 If you discover important sub-topics that need separate investigation, include them in the JSON block at the end."""
-        
+
         response = self.client.complete(
             prompt=prompt,
             system=system,
@@ -1395,7 +1353,7 @@ If you discover important sub-topics that need separate investigation, include t
             temperature=self.config.llm.temperature.writer,
             model=self.config.llm.models.writer
         )
-        
+
         # Parse response for content, new tasks, and glossary
         content, new_tasks, glossary_terms = self._parse_research_response(response, task, session_id=session_id)
 
@@ -1575,11 +1533,11 @@ If you discover important sub-topics that need separate investigation, include t
 
 
 # =============================================================================
-# DISCOVERY AGENT
+# OUTLINE DESIGNER AGENT
 # =============================================================================
 
-class DiscoveryAgent:
-    """Agent responsible for identifying research gaps after sections are written"""
+class OutlineDesignerAgent:
+    """Agent responsible for designing the report outline from pre-planning context"""
 
     def __init__(self):
         self.client = get_llm_client()
@@ -1589,115 +1547,475 @@ class DiscoveryAgent:
     def config(self):
         return get_config()
 
-    def discover_tasks(
-        self,
-        query: str,
-        all_tasks: List[Dict[str, str]],
-        section_summaries: List[Dict[str, str]],
-        session_id: int = None
-    ) -> List[Dict]:
+    def design_outline(self, query: str, pre_plan_context: str, session_id: int) -> List[ReportSection]:
+        """Design report sections from the pre-planning analysis.
+
+        Returns list of ReportSection objects saved to DB.
         """
-        Review completed work and identify gaps in coverage.
+        target_sections = self.config.research.min_initial_tasks
+        max_sections = max(target_sections + 2, int(target_sections * 1.5))
+        logger.info(f"Designing report outline (target ~{target_sections} sections, max {max_sections})...")
 
-        Args:
-            query: Original research query
-            all_tasks: List of dicts with 'topic', 'status' keys
-            section_summaries: List of dicts with 'topic', 'summary' keys
-            session_id: Current session ID
-
-        Returns:
-            List of new task dicts with 'topic', 'description', 'priority' keys
-        """
-        logger.info("Running discovery agent for gap analysis...")
-
-        # Build task list context (include descriptions for overlap detection)
-        tasks_text = "\n".join(
-            f"- [{t['status']}] {t['topic']}: {t.get('description', '')}" for t in all_tasks
+        system = OUTLINE_DESIGNER_SYSTEM_PROMPT.format(
+            target_sections=target_sections,
+            max_sections=max_sections,
         )
 
-        # Build section summaries context
-        summaries_text = "\n\n".join(
-            f"### {s['topic']}\n{s['summary']}" for s in section_summaries
-        )
+        prompt = f"""Design a report outline for the following research query.
 
-        prompt = f"""Analyze the following research project for gaps in coverage.
-
-## Original Research Query
+## Research Query
 {query}
 
-## All Tasks (completed and pending)
-{tasks_text}
-
-## Summaries of Completed Sections
-{summaries_text}
+## Pre-Planning Analysis
+{pre_plan_context}
 
 ---
-
-Identify up to {self.config.discovery.max_suggestions_per_run} important topics that are missing and would significantly improve the report's comprehensiveness. Only suggest topics that do NOT overlap with existing tasks."""
+Design approximately {target_sections} sections (no more than {max_sections}) that collectively cover this topic. Each section should be a coherent chapter covering a specific aspect."""
 
         try:
             response = self.client.complete(
                 prompt=prompt,
-                system=DISCOVERY_SYSTEM_PROMPT,
-                max_tokens=self.config.llm.max_tokens.discovery,
-                temperature=self.config.llm.temperature.discovery,
+                system=system,
+                max_tokens=self.config.llm.max_tokens.outline_designer,
+                temperature=self.config.llm.temperature.outline_designer,
                 json_mode=True,
-                model=self.config.llm.models.discovery
+                model=self.config.llm.models.outline_designer
             )
 
-            return self._parse_discovery_response(response, all_tasks, session_id)
+            data = json.loads(response)
+            section_list = data.get("sections", [])
+
+            if not section_list:
+                raise ValueError("No sections returned by outline designer")
+
+            # Hard-cap: truncate if LLM exceeded the maximum
+            if len(section_list) > max_sections:
+                logger.warning(f"Outline designer returned {len(section_list)} sections, truncating to {max_sections}")
+                section_list = section_list[:max_sections]
+
+            # Create ReportSection objects
+            sections = []
+            for item in section_list:
+                sections.append(ReportSection(
+                    title=item.get("title", "Untitled Section"),
+                    description=item.get("description", ""),
+                    position=item.get("position", len(sections) + 1),
+                    status=SectionStatus.PLANNED,
+                ))
+
+            # Save to DB
+            saved_sections = self.db.add_sections_bulk(sections, session_id)
+            logger.info(f"Designed outline with {len(saved_sections)} sections")
+            return saved_sections
 
         except Exception as e:
-            logger.warning(f"Discovery agent failed: {e}")
-            return []
+            logger.error(f"Outline design failed: {e}")
+            raise
 
-    def _parse_discovery_response(
+
+# =============================================================================
+# SECTION TASK PLANNER AGENT
+# =============================================================================
+
+class SectionTaskPlannerAgent:
+    """Agent responsible for creating research tasks for each section"""
+
+    def __init__(self):
+        self.client = get_llm_client()
+        self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
+
+    def plan_tasks_for_section(
         self,
-        response: str,
-        all_tasks: List[Dict[str, str]],
-        session_id: int = None
-    ) -> List[Dict]:
-        """Parse discovery agent JSON response into task dicts."""
+        section: ReportSection,
+        all_sections: List[ReportSection],
+        query: str,
+        session_id: int,
+        task_budget: int = None,
+    ) -> List[ResearchTask]:
+        """Generate research tasks for a single section.
+
+        Returns list of ResearchTask objects saved to DB.
+        """
+        logger.info(f"Planning tasks for section: {section.title}")
+
+        tasks_per_section = self.config.research.tasks_per_section
+        if task_budget is not None:
+            tasks_per_section = min(tasks_per_section, task_budget)
+
+        # Build outline context
+        outline_text = "\n".join(
+            f"{s.position}. {s.title}: {s.description}" for s in all_sections
+        )
+
+        system = SECTION_TASK_PLANNER_SYSTEM_PROMPT.format(
+            tasks_per_section=tasks_per_section
+        )
+
+        prompt = f"""Generate research tasks for the following section.
+
+## Research Query
+{query}
+
+## Full Report Outline
+{outline_text}
+
+## Target Section
+Title: {section.title}
+Description: {section.description}
+
+---
+Generate {tasks_per_section} focused research tasks for this section."""
+
         try:
-            data = json.loads(response)
-            suggestions = data.get("suggestions", [])
-        except json.JSONDecodeError:
-            logger.warning("Discovery agent returned invalid JSON")
-            return []
-
-        # Check task limit
-        total_tasks = self.db.get_task_count(session_id=session_id)
-        remaining_capacity = self.config.research.max_total_tasks - total_tasks
-        if remaining_capacity <= 0:
-            return []
-
-        existing_topics = [t['topic'].lower() for t in all_tasks]
-        new_tasks = []
-
-        for suggestion in suggestions[:self.config.discovery.max_suggestions_per_run]:
-            if not isinstance(suggestion, dict) or "topic" not in suggestion:
-                continue
-
-            topic = suggestion["topic"]
-            # Deduplication check
-            is_duplicate = any(
-                topic.lower() in et or et in topic.lower()
-                for et in existing_topics
+            response = self.client.complete(
+                prompt=prompt,
+                system=system,
+                max_tokens=self.config.llm.max_tokens.planner,
+                temperature=self.config.llm.temperature.planner,
+                json_mode=True,
+                model=self.config.llm.models.planner
             )
-            if is_duplicate:
-                continue
 
-            new_tasks.append({
-                "topic": topic,
-                "description": suggestion.get("description", ""),
-                "priority": min(suggestion.get("priority", 5), 8),
-                "depth": 1,
+            data = json.loads(response)
+            task_list = data.get("tasks", [])
+
+            if not task_list:
+                # Fallback: create a single task from the section description
+                task_list = [{
+                    "topic": section.title,
+                    "description": section.description,
+                    "priority": 5
+                }]
+
+            output_dir = self.config.output.directory
+            existing_count = self.db.get_task_count(session_id=session_id)
+
+            pending_tasks = []
+            for i, item in enumerate(task_list[:tasks_per_section]):
+                file_index = existing_count + i + 1
+                pending_tasks.append(ResearchTask(
+                    section_id=section.id,
+                    topic=item.get("topic", f"Task {i+1} for {section.title}"),
+                    description=item.get("description", ""),
+                    file_path=generate_file_path(
+                        item.get("topic", section.title),
+                        output_dir,
+                        file_index
+                    ),
+                    priority=item.get("priority", 5),
+                    depth=0,
+                    status=TaskStatus.PENDING
+                ))
+
+            tasks = self.db.add_tasks_bulk(pending_tasks, session_id)
+
+            # Update section status
+            self.db.update_section(section.id, status=SectionStatus.RESEARCHING.value)
+
+            # Update session total tasks
+            total = self.db.get_task_count(session_id=session_id)
+            self.db.update_session(session_id, total_tasks=total)
+
+            logger.info(f"Created {len(tasks)} tasks for section '{section.title}'")
+            return tasks
+
+        except Exception as e:
+            logger.error(f"Task planning failed for section '{section.title}': {e}")
+            raise
+
+
+# =============================================================================
+# GAP ANALYSIS AGENT
+# =============================================================================
+
+class GapAnalysisAgent:
+    """Agent responsible for identifying gaps after initial research completes"""
+
+    def __init__(self):
+        self.client = get_llm_client()
+        self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
+
+    def analyze_gaps(
+        self,
+        query: str,
+        sections: List[ReportSection],
+        session_id: int
+    ) -> dict:
+        """Analyze research gaps at both section and cross-section levels.
+
+        Creates new tasks and sections in DB as needed.
+        Returns dict with counts of new items created.
+        """
+        if not self.config.gap_analysis.enabled:
+            logger.info("Gap analysis is disabled")
+            return {"new_tasks": 0, "new_sections": 0}
+
+        logger.info("Running comprehensive gap analysis...")
+
+        # Build section summaries from completed task notes
+        section_summaries = []
+        for section in sections:
+            tasks = self.db.get_tasks_for_section(section.id)
+            completed = [t for t in tasks if t.status == "completed"]
+            notes = []
+            for t in completed:
+                content = read_file(t.file_path)
+                if content:
+                    words = content.split()
+                    notes.append(f"**{t.topic}**: " + " ".join(words[:200]))
+            section_summaries.append({
+                "title": section.title,
+                "description": section.description,
+                "research_notes": "\n".join(notes) if notes else "(no research completed)"
             })
 
-            if len(new_tasks) >= remaining_capacity:
-                break
+        # Build prompt
+        outline_text = "\n".join(
+            f"{s.position}. {s.title}: {s.description}" for s in sections
+        )
 
-        return new_tasks
+        summaries_text = "\n\n".join(
+            f"### {s['title']}\n{s['description']}\n\nResearch gathered:\n{s['research_notes']}"
+            for s in section_summaries
+        )
+
+        prompt = f"""Analyze the following research project for gaps.
+
+## Research Query
+{query}
+
+## Report Outline
+{outline_text}
+
+## Research Notes Per Section
+{summaries_text}
+
+---
+Identify per-section gaps and any new sections needed. Max {self.config.gap_analysis.max_new_sections} new sections, max {self.config.gap_analysis.max_gap_fill_tasks} total new tasks."""
+
+        try:
+            response = self.client.complete(
+                prompt=prompt,
+                system=PIPELINE_GAP_ANALYSIS_SYSTEM_PROMPT,
+                max_tokens=self.config.llm.max_tokens.analyzer,
+                temperature=self.config.llm.temperature.analyzer,
+                json_mode=True,
+                model=self.config.llm.models.analyzer
+            )
+
+            data = json.loads(response)
+            return self._process_gaps(data, sections, query, session_id)
+
+        except Exception as e:
+            logger.warning(f"Gap analysis failed: {e}")
+            return {"new_tasks": 0, "new_sections": 0}
+
+    def _process_gaps(
+        self,
+        data: dict,
+        sections: List[ReportSection],
+        query: str,
+        session_id: int
+    ) -> dict:
+        """Process gap analysis results: create tasks and sections in DB."""
+        output_dir = self.config.output.directory
+        existing_count = self.db.get_task_count(session_id=session_id)
+        task_index = existing_count
+        total_new_tasks = 0
+        total_new_sections = 0
+        max_gap_tasks = self.config.gap_analysis.max_gap_fill_tasks
+
+        section_map = {s.title: s for s in sections}
+
+        # Process per-section gaps
+        for gap in data.get("section_gaps", []):
+            if total_new_tasks >= max_gap_tasks:
+                break
+            section_title = gap.get("section_title", "")
+            section = section_map.get(section_title)
+            if not section:
+                continue
+
+            for task_data in gap.get("suggested_tasks", []):
+                if total_new_tasks >= max_gap_tasks:
+                    break
+                task_index += 1
+                task = ResearchTask(
+                    section_id=section.id,
+                    topic=task_data.get("topic", "Gap-fill task"),
+                    description=task_data.get("description", ""),
+                    file_path=generate_file_path(
+                        task_data.get("topic", "gap-fill"),
+                        output_dir,
+                        task_index
+                    ),
+                    priority=task_data.get("priority", 5),
+                    depth=0,
+                    is_gap_fill=True,
+                    status=TaskStatus.PENDING
+                )
+                self.db.add_task(task, session_id)
+                total_new_tasks += 1
+
+        # Process new sections
+        max_new = self.config.gap_analysis.max_new_sections
+        max_position = max((s.position for s in sections), default=0)
+        for new_sec in data.get("new_sections", [])[:max_new]:
+            if total_new_tasks >= max_gap_tasks:
+                break
+            max_position += 1
+            new_section = ReportSection(
+                title=new_sec.get("title", "New Section"),
+                description=new_sec.get("description", ""),
+                position=new_sec.get("position", max_position),
+                status=SectionStatus.RESEARCHING,
+                is_gap_fill=True,
+            )
+            saved_section = self.db.add_section(new_section, session_id)
+            total_new_sections += 1
+
+            for task_data in new_sec.get("suggested_tasks", []):
+                if total_new_tasks >= max_gap_tasks:
+                    break
+                task_index += 1
+                task = ResearchTask(
+                    section_id=saved_section.id,
+                    topic=task_data.get("topic", "Gap-fill task"),
+                    description=task_data.get("description", ""),
+                    file_path=generate_file_path(
+                        task_data.get("topic", "gap-fill"),
+                        output_dir,
+                        task_index
+                    ),
+                    priority=task_data.get("priority", 5),
+                    depth=0,
+                    is_gap_fill=True,
+                    status=TaskStatus.PENDING
+                )
+                self.db.add_task(task, session_id)
+                total_new_tasks += 1
+
+        # Update session task count
+        total = self.db.get_task_count(session_id=session_id)
+        self.db.update_session(session_id, total_tasks=total)
+
+        logger.info(f"Gap analysis created {total_new_tasks} tasks, {total_new_sections} new sections")
+        return {"new_tasks": total_new_tasks, "new_sections": total_new_sections}
+
+
+# =============================================================================
+# SYNTHESIS AGENT
+# =============================================================================
+
+class SynthesisAgent:
+    """Agent responsible for synthesizing research notes into polished section prose"""
+
+    def __init__(self):
+        self.client = get_llm_client()
+        self.db = get_database()
+
+    @property
+    def config(self):
+        return get_config()
+
+    def synthesize_section(
+        self,
+        section: ReportSection,
+        query: str,
+        all_sections: List[ReportSection],
+        adjacent_summaries: Dict[str, str],
+        session_id: int
+    ) -> str:
+        """Synthesize all research notes for a section into polished prose.
+
+        Args:
+            section: The section to synthesize
+            query: Original research query
+            all_sections: Full outline for context
+            adjacent_summaries: {"previous": str, "next": str} summaries
+            session_id: Current session ID
+
+        Returns:
+            Synthesized markdown content
+        """
+        logger.info(f"Synthesizing section: {section.title}")
+
+        # Mark section as synthesizing
+        self.db.update_section(section.id, status=SectionStatus.SYNTHESIZING.value)
+
+        # Gather all research notes for this section
+        tasks = self.db.get_tasks_for_section(section.id)
+        completed = [t for t in tasks if t.status == "completed"]
+
+        research_notes = []
+        for task in completed:
+            content = read_file(task.file_path)
+            if content:
+                research_notes.append(f"### Research Task: {task.topic}\n\n{content}")
+
+        if not research_notes:
+            logger.warning(f"No research notes for section '{section.title}'")
+            return ""
+
+        notes_text = "\n\n---\n\n".join(research_notes)
+
+        # Build outline context
+        outline_text = "\n".join(
+            f"{s.position}. {s.title}" for s in all_sections
+        )
+
+        # Build adjacent section context
+        adjacent_text = ""
+        if adjacent_summaries.get("previous"):
+            adjacent_text += f"\n## Previous Section Summary\n{adjacent_summaries['previous']}\n"
+        if adjacent_summaries.get("next"):
+            adjacent_text += f"\n## Next Section Preview\n{adjacent_summaries['next']}\n"
+
+        style = getattr(self.config.synthesis, 'style', 'balanced')
+        style_guidance = _SYNTHESIS_STYLE_GUIDANCE.get(style, _SYNTHESIS_STYLE_GUIDANCE['balanced'])
+
+        system = SECTION_SYNTHESIS_SYSTEM_PROMPT.format(
+            min_words=self.config.synthesis.min_words_per_section,
+            max_words=self.config.synthesis.max_words_per_section,
+            min_citations=self.config.synthesis.min_citations_per_section,
+            style_guidance=style_guidance,
+        )
+
+        prompt = f"""Synthesize the following research notes into a polished section.
+
+## Research Query
+{query}
+
+## Report Outline
+{outline_text}
+
+## This Section
+Title: {section.title}
+Description: {section.description}
+{adjacent_text}
+## Research Notes
+{notes_text}
+
+---
+Write a cohesive, well-structured section that synthesizes all the findings above."""
+
+        response = self.client.complete(
+            prompt=prompt,
+            system=system,
+            max_tokens=self.config.llm.max_tokens.synthesizer,
+            temperature=self.config.llm.temperature.synthesizer,
+            model=self.config.llm.models.synthesizer
+        )
+
+        return response
 
 
 # =============================================================================
@@ -1705,7 +2023,7 @@ Identify up to {self.config.discovery.max_suggestions_per_run} important topics 
 # =============================================================================
 
 class EditorAgent:
-    """Agent responsible for final compilation and editing"""
+    """Agent responsible for executive summary and conclusion generation"""
 
     def __init__(self):
         self.client = get_llm_client()
@@ -1714,20 +2032,14 @@ class EditorAgent:
     @property
     def config(self):
         return get_config()
-    
+
     def generate_executive_summary(
         self,
         query: str,
         section_summaries: List[Dict[str, str]],
         report_structure: str = ""
     ) -> str:
-        """Generate an executive summary for the report.
-
-        Args:
-            query: The original research query
-            section_summaries: List of dicts with 'topic' and 'summary' keys
-            report_structure: Optional hierarchical structure description (groups/chapters)
-        """
+        """Generate an executive summary for the report."""
         logger.info("Generating executive summary...")
 
         sections_text = "\n\n".join(
@@ -1756,7 +2068,7 @@ Synthesize the actual findings above into a 300-500 word executive summary."""
         )
 
         return response
-    
+
     def generate_conclusion(
         self,
         query: str,
@@ -1764,14 +2076,7 @@ Synthesize the actual findings above into a 300-500 word executive summary."""
         word_count: int,
         report_structure: str = ""
     ) -> str:
-        """Generate a conclusion for the report.
-
-        Args:
-            query: The original research query
-            section_summaries: List of dicts with 'topic' and 'summary' keys
-            word_count: Total words in the report body
-            report_structure: Optional hierarchical structure description (groups/chapters)
-        """
+        """Generate a conclusion for the report."""
         logger.info("Generating conclusion...")
 
         sections_text = "\n\n".join(
@@ -1800,299 +2105,3 @@ Write a 400-600 word conclusion that synthesizes findings across sections, ident
         )
 
         return response
-
-    def determine_section_order(
-        self,
-        query: str,
-        section_topics: List[str],
-        section_summaries: List[Dict[str, str]] = None
-    ) -> List[str]:
-        """Determine the optimal reading order for report sections.
-
-        Args:
-            query: The original research query
-            section_topics: List of section topic strings
-            section_summaries: Optional list of dicts with 'topic' and 'summary' keys
-
-        Returns:
-            Ordered list of section topics
-        """
-        logger.info("Determining optimal section order...")
-
-        if section_summaries:
-            topics_text = "\n".join(
-                f"- **{s['topic']}**: {s['summary'][:200]}" for s in section_summaries
-            )
-        else:
-            topics_text = "\n".join(f"- {t}" for t in section_topics)
-
-        prompt = f"""Determine the optimal reading order for these sections of a research report.
-
-Research Query: {query}
-
-Sections (in current arbitrary order):
-{topics_text}
-
-Reorder them for the best logical flow and reading experience."""
-
-        try:
-            response = self.client.complete(
-                prompt=prompt,
-                system=REORDER_SYSTEM_PROMPT,
-                max_tokens=self.config.llm.max_tokens.editor,
-                temperature=0.1,
-                json_mode=True,
-                model=self.config.llm.models.editor
-            )
-
-            data = json.loads(response)
-            ordered = data.get("order", [])
-
-            # Validate: every original topic must appear exactly once
-            original_set = set(section_topics)
-            ordered_set = set(ordered)
-
-            if ordered_set == original_set:
-                return ordered
-
-            # Fallback: use returned order for known topics, append missing ones
-            logger.warning("Reorder response missing/extra topics; patching...")
-            result = [t for t in ordered if t in original_set]
-            for t in section_topics:
-                if t not in ordered_set:
-                    result.append(t)
-            return result
-
-        except Exception as e:
-            logger.warning(f"Section reorder failed: {e}; keeping original order")
-            return section_topics
-
-    def rewrite_section(
-        self,
-        query: str,
-        section_topic: str,
-        section_content: str,
-        toc: List[str],
-        preceding_summaries: List[Dict[str, str]],
-        following_topics: List[str]
-    ) -> str:
-        """Rewrite a single section for cohesion within the full report.
-
-        Args:
-            query: Original research query
-            section_topic: This section's topic
-            section_content: Original markdown content of this section
-            toc: Full ordered table of contents (topic strings)
-            preceding_summaries: Summaries of sections before this one
-            following_topics: Topics of sections after this one
-
-        Returns:
-            Rewritten section content (markdown, no ## heading)
-        """
-        logger.info(f"Rewriting section: {section_topic}")
-
-        toc_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(toc))
-
-        preceding_text = ""
-        if preceding_summaries:
-            preceding_text = "\n\n".join(
-                f"### {s['topic']}\n{s['summary']}" for s in preceding_summaries
-            )
-
-        following_text = ""
-        if following_topics:
-            following_text = "\n".join(f"- {t}" for t in following_topics)
-
-        prompt = f"""Rewrite this section for cohesion within the full report.
-
-## Research Query
-{query}
-
-## Full Table of Contents
-{toc_text}
-
-## Preceding Section Summaries
-{preceding_text if preceding_text else "(This is the first section)"}
-
-## Sections After This One
-{following_text if following_text else "(This is the last section)"}
-
-## Section to Rewrite: {section_topic}
-
-{section_content}
-
----
-
-Rewrite the above section content. Preserve all facts, data, and citations. Improve transitions and reduce repetition with preceding sections."""
-
-        try:
-            response = self.client.complete(
-                prompt=prompt,
-                system=REWRITE_SYSTEM_PROMPT,
-                max_tokens=self.config.llm.max_tokens.editor,
-                temperature=self.config.llm.temperature.editor,
-                model=self.config.llm.models.editor
-            )
-            return response
-        except Exception as e:
-            logger.warning(f"Rewrite failed for '{section_topic}': {e}; keeping original")
-            return section_content
-
-    def group_sections_into_topics(
-        self,
-        query: str,
-        section_summaries: List[Dict[str, str]]
-    ) -> List[Dict]:
-        """Group sections into primary topic clusters.
-
-        Args:
-            query: Original research query
-            section_summaries: List of dicts with 'topic' and 'summary' keys
-
-        Returns:
-            List of group dicts: [{"title": str, "sections": [{"original_topic": str, "subtopic_title": str}]}]
-        """
-        logger.info("Grouping sections into topic clusters...")
-
-        sections_text = "\n".join(
-            f"- **{s['topic']}**: {s['summary']}" for s in section_summaries
-        )
-
-        prompt = f"""Organize the following research sections into 2-7 primary topic groups.
-
-## Research Query
-{query}
-
-## Sections
-{sections_text}
-
-Group these sections into logical chapters and assign subtopic titles."""
-
-        try:
-            response = self.client.complete(
-                prompt=prompt,
-                system=RESTRUCTURE_GROUPING_SYSTEM_PROMPT,
-                max_tokens=self.config.llm.max_tokens.editor,
-                temperature=0.1,
-                json_mode=True,
-                model=self.config.llm.models.editor
-            )
-
-            data = json.loads(response)
-            groups = data.get("groups", [])
-
-            if not groups:
-                raise ValueError("Empty groups returned")
-
-            # Validate all original topics are present
-            assigned_topics = set()
-            for group in groups:
-                for section in group.get("sections", []):
-                    assigned_topics.add(section.get("original_topic", ""))
-
-            original_topics = {s["topic"] for s in section_summaries}
-            missing = original_topics - assigned_topics
-
-            if missing:
-                logger.warning(f"Grouping missed {len(missing)} sections; appending to last group")
-                last_group = groups[-1]
-                for topic in missing:
-                    last_group["sections"].append({
-                        "original_topic": topic,
-                        "subtopic_title": topic,
-                    })
-
-            return groups
-
-        except Exception as e:
-            logger.warning(f"Section grouping failed: {e}; using flat fallback")
-            # Fallback: one group per section
-            return [
-                {
-                    "title": s["topic"],
-                    "sections": [{"original_topic": s["topic"], "subtopic_title": s["topic"]}],
-                }
-                for s in section_summaries
-            ]
-
-    def rewrite_section_in_group(
-        self,
-        query: str,
-        group_title: str,
-        subtopic_title: str,
-        section_content: str,
-        full_toc: str,
-        preceding_siblings: List[Dict[str, str]],
-        following_sibling_titles: List[str],
-        other_groups_summary: str
-    ) -> str:
-        """Rewrite a section within its topic-group context.
-
-        Args:
-            query: Original research query
-            group_title: The primary topic (chapter) this section belongs to
-            subtopic_title: The assigned subtopic title
-            section_content: Original markdown content
-            full_toc: Full hierarchical TOC string (all groups + subtopics)
-            preceding_siblings: List of {"subtopic_title": str, "content_or_summary": str}
-                for subtopics before this one in the group
-            following_sibling_titles: List of subtopic title strings after this one
-            other_groups_summary: Text listing all other groups and subtopics
-
-        Returns:
-            Rewritten section content (markdown, no heading)
-        """
-        logger.info(f"Rewriting section in group context: {subtopic_title}")
-
-        preceding_text = ""
-        if preceding_siblings:
-            parts = []
-            for sib in preceding_siblings:
-                parts.append(f"### {sib['subtopic_title']}\n{sib['content_or_summary']}")
-            preceding_text = "\n\n".join(parts)
-
-        following_text = ""
-        if following_sibling_titles:
-            following_text = "\n".join(f"- {t}" for t in following_sibling_titles)
-
-        prompt = f"""Rewrite this section within its topic-group context.
-
-## Research Query
-{query}
-
-## Full Report Structure
-{full_toc}
-
-## Current Group (Chapter): {group_title}
-
-## This Section: {subtopic_title}
-
-## Preceding Subtopics in This Group
-{preceding_text if preceding_text else "(This is the first subtopic in the group)"}
-
-## Following Subtopics in This Group
-{following_text if following_text else "(This is the last subtopic in the group)"}
-
-## Other Groups in the Report
-{other_groups_summary if other_groups_summary else "(No other groups)"}
-
-## Section Content to Rewrite
-
-{section_content}
-
----
-
-Rewrite the above section content. Preserve all facts, data, and citations. Improve coherence within the group context."""
-
-        try:
-            response = self.client.complete(
-                prompt=prompt,
-                system=RESTRUCTURE_REWRITE_SYSTEM_PROMPT,
-                max_tokens=self.config.llm.max_tokens.editor,
-                temperature=self.config.llm.temperature.editor,
-                model=self.config.llm.models.editor
-            )
-            return response
-        except Exception as e:
-            logger.warning(f"Restructure rewrite failed for '{subtopic_title}': {e}; keeping original")
-            return section_content
