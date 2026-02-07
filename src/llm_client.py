@@ -28,7 +28,7 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-4.1-nano":  {"input": 0.10,  "output": 0.40},
     "gpt-4.1-mini":  {"input": 0.40,  "output": 1.60},
     "gpt-4.1":       {"input": 2.00,  "output": 8.00},
-    "gpt-5-mini":    {"input": 1.25,  "output": 5.00},
+    "gpt-5-mini":    {"input": 0.25,  "output": 2.00},
     "gpt-5.1-mini":  {"input": 0.80,  "output": 3.20},
     "gpt-5":         {"input": 10.00, "output": 30.00},
     "gpt-5.1":       {"input": 3.00,  "output": 12.00},
@@ -49,7 +49,7 @@ def _build_pricing_map() -> Dict[str, Dict[str, float]]:
     try:
         settings = get_env_settings()
         config = get_config()
-        for role in ("planner", "researcher", "writer", "editor", "discovery"):
+        for role in ("planner", "researcher", "writer", "editor", "analyzer"):
             model_name = getattr(config.llm.models, role)
             input_cost = getattr(settings, f"{role}_model_input_cost")
             output_cost = getattr(settings, f"{role}_model_output_cost")

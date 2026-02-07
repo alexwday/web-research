@@ -3,6 +3,7 @@
 
 {% block content %}
 {% set sp = "&session=" ~ session_id|string if session_id else "" %}
+{% set sq = "?session=" ~ session_id|string if session_id else "" %}
 <h1 class="page-title">Dashboard</h1>
 
 <!-- Start / Stop research -->
@@ -224,7 +225,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- Progress bar (polled) -->
 <div id="progress-area"
-     hx-get="/fragments/progress?session={{ session_id or '' }}"
+     hx-get="/fragments/progress{{ sq }}"
      hx-trigger="every 5s"
      hx-swap="innerHTML">
     {% include "fragments/progress.html" %}
@@ -232,7 +233,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- Stats grid (polled) -->
 <div id="stats-area"
-     hx-get="/fragments/stats?session={{ session_id or '' }}"
+     hx-get="/fragments/stats{{ sq }}"
      hx-trigger="every 5s"
      hx-swap="innerHTML">
     {% include "fragments/stats.html" %}
@@ -243,7 +244,7 @@ document.addEventListener('DOMContentLoaded', function() {
 <div class="activity-section">
     <h3 class="activity-heading">Activity Log</h3>
     <div id="activity-log-area"
-         hx-get="/fragments/search-activity?session={{ session_id or '' }}"
+         hx-get="/fragments/search-activity{{ sq }}"
          hx-trigger="every 3s"
          hx-swap="innerHTML">
         {% include "fragments/search_activity.html" %}

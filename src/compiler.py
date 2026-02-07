@@ -534,6 +534,9 @@ class ReportCompiler:
     def _build_global_sources(self, chapters: List[Dict]) -> tuple:
         """Build a global deduplicated source list and remap citations in each chapter.
 
+        Supports both section-based chapters ({"section": ..., "content": ...})
+        and task-based chapters ({"task": ..., "content": ...}).
+
         Returns (global_sources, updated_chapters) where citations in each
         chapter's content have been rewritten to match global numbering.
         """
@@ -542,26 +545,34 @@ class ReportCompiler:
 
         updated_chapters = []
         for chapter in chapters:
-            task = chapter["task"]
-            task_sources = self.db.get_sources_for_task(task.id)
+            # Determine whether this is section-based or task-based
+            section = chapter.get("section")
+            task = chapter.get("task")
 
-            # local_to_global mapping for this chapter
-            local_to_global: Dict[int, int] = {}
-            for local_idx, source in enumerate(task_sources, 1):
-                if source.url not in url_to_global:
-                    global_sources.append(source)
-                    url_to_global[source.url] = len(global_sources)
-                local_to_global[local_idx] = url_to_global[source.url]
+            if section:
+                # Section-based: get sources from all tasks in this section
+                section_sources = self.db.get_sources_for_section(section.id)
+                local_to_global: Dict[int, int] = {}
+                for local_idx, source in enumerate(section_sources, 1):
+                    if source.url not in url_to_global:
+                        global_sources.append(source)
+                        url_to_global[source.url] = len(global_sources)
+                    local_to_global[local_idx] = url_to_global[source.url]
 
-            # Remap citations in content
-            remapped_content = self._remap_citations(chapter["content"], local_to_global)
-            updated = {"task": task, "content": remapped_content}
-            # Preserve restructure metadata if present
-            if "topic_group" in chapter:
-                updated["topic_group"] = chapter["topic_group"]
-            if "subtopic_title" in chapter:
-                updated["subtopic_title"] = chapter["subtopic_title"]
-            updated_chapters.append(updated)
+                remapped_content = self._remap_citations(chapter["content"], local_to_global)
+                updated_chapters.append({"section": section, "content": remapped_content})
+            elif task:
+                # Task-based (backward compatibility)
+                task_sources = self.db.get_sources_for_task(task.id)
+                local_to_global: Dict[int, int] = {}
+                for local_idx, source in enumerate(task_sources, 1):
+                    if source.url not in url_to_global:
+                        global_sources.append(source)
+                        url_to_global[source.url] = len(global_sources)
+                    local_to_global[local_idx] = url_to_global[source.url]
+
+                remapped_content = self._remap_citations(chapter["content"], local_to_global)
+                updated_chapters.append({"task": task, "content": remapped_content})
 
         return global_sources, updated_chapters
 
@@ -605,31 +616,20 @@ class ReportCompiler:
         lines.append("---")
         lines.append("")
         
-        # Detect hierarchical (restructured) mode
-        is_hierarchical = any(ch.get("topic_group") for ch in chapters)
+        # Detect chapter type: section-based or task-based
+        is_section_based = any(ch.get("section") for ch in chapters)
 
         # Table of Contents
         if self.config.output.include_toc:
             lines.append("## Table of Contents")
             lines.append("")
-            if is_hierarchical:
-                current_group = None
-                group_num = 0
-                for chapter in chapters:
-                    group = chapter.get("topic_group", "")
-                    subtopic = chapter.get("subtopic_title", chapter["task"].topic)
-                    if group != current_group:
-                        current_group = group
-                        group_num += 1
-                        anchor = self._slugify(group)
-                        lines.append(f"{group_num}. [{group}](#{anchor})")
-                    sub_anchor = self._slugify(subtopic)
-                    lines.append(f"   - [{subtopic}](#{sub_anchor})")
-            else:
-                for i, chapter in enumerate(chapters, 1):
+            for i, chapter in enumerate(chapters, 1):
+                if is_section_based:
+                    title = chapter["section"].title
+                else:
                     title = chapter["task"].topic
-                    anchor = self._slugify(title)
-                    lines.append(f"{i}. [{title}](#{anchor})")
+                anchor = self._slugify(title)
+                lines.append(f"{i}. [{title}](#{anchor})")
             lines.append("")
             lines.append("---")
             lines.append("")
@@ -644,41 +644,21 @@ class ReportCompiler:
             lines.append("")
 
         # Main Content
-        if is_hierarchical:
-            current_group = None
-            for chapter in chapters:
-                group = chapter.get("topic_group", "")
-                subtopic = chapter.get("subtopic_title", chapter["task"].topic)
-                content = chapter["content"]
-                # Insert group heading when group changes
-                if group != current_group:
-                    if current_group is not None:
-                        lines.append("---")
-                        lines.append("")
-                    current_group = group
-                    lines.append(f"## {group}")
-                    lines.append("")
-                # Subtopic heading
-                lines.append(f"### {subtopic}")
-                lines.append("")
-                content = self._normalize_headings(content)
-                content = self._demote_headings(content)
-                lines.append(content)
-                lines.append("")
+        for chapter in chapters:
+            content = chapter["content"]
+            if is_section_based:
+                title = chapter["section"].title
+            else:
+                title = chapter["task"].topic
+            # Add section heading
+            lines.append(f"## {title}")
+            lines.append("")
+            # Ensure proper heading levels
+            content = self._normalize_headings(content)
+            lines.append(content)
+            lines.append("")
             lines.append("---")
             lines.append("")
-        else:
-            for chapter in chapters:
-                content = chapter["content"]
-                # Add section heading
-                lines.append(f"## {chapter['task'].topic}")
-                lines.append("")
-                # Ensure proper heading levels
-                content = self._normalize_headings(content)
-                lines.append(content)
-                lines.append("")
-                lines.append("---")
-                lines.append("")
         
         # Conclusion
         if conclusion:
@@ -735,38 +715,22 @@ class ReportCompiler:
         # Keep slug generation deterministic for this output format
         self._used_slugs = set()
 
-        # Detect hierarchical (restructured) mode
-        is_hierarchical = any(ch.get("topic_group") for ch in chapters)
+        # Detect chapter type: section-based or task-based
+        is_section_based = any(ch.get("section") for ch in chapters)
 
         # Build TOC
         toc = []
         if self.config.output.include_toc:
-            if is_hierarchical:
-                current_group = None
-                for chapter in chapters:
-                    group = chapter.get("topic_group", "")
-                    subtopic = chapter.get("subtopic_title", chapter["task"].topic)
-                    if group != current_group:
-                        current_group = group
-                        group_anchor = self._slugify(group)
-                        toc.append({
-                            "id": group_anchor,
-                            "title": group,
-                            "children": [],
-                        })
-                    sub_anchor = self._slugify(subtopic)
-                    toc[-1]["children"].append({
-                        "id": sub_anchor,
-                        "title": subtopic,
-                    })
-            else:
-                for chapter in chapters:
+            for chapter in chapters:
+                if is_section_based:
+                    title = chapter["section"].title
+                else:
                     title = chapter["task"].topic
-                    anchor = self._slugify(title)
-                    toc.append({
-                        "id": anchor,
-                        "title": title,
-                    })
+                anchor = self._slugify(title)
+                toc.append({
+                    "id": anchor,
+                    "title": title,
+                })
 
         # Convert content to HTML
         content_parts = []
@@ -776,73 +740,32 @@ class ReportCompiler:
             content_parts.append(f'<h2 id="executive-summary">Executive Summary</h2>')
             content_parts.append(markdown.markdown(executive_summary))
 
-        # Main chapters
-        if is_hierarchical:
-            # Re-derive anchors in same order as TOC to stay in sync
-            self._used_slugs_content = set()
-            current_group = None
-            for chapter in chapters:
-                group = chapter.get("topic_group", "")
-                subtopic = chapter.get("subtopic_title", chapter["task"].topic)
-                md_content = chapter["content"]
+        # Main chapters (flat sections — outline defines structure)
+        for chapter in chapters:
+            if is_section_based:
+                title = chapter["section"].title
+            else:
+                title = chapter["task"].topic
+            md_content = chapter["content"]
 
-                if group != current_group:
-                    if current_group is not None:
-                        content_parts.append('</section>')
-                        content_parts.append('<hr>')
-                    current_group = group
-                    # Find the matching TOC anchor for this group
-                    group_anchor = ""
-                    for toc_item in toc:
-                        if toc_item["title"] == group:
-                            group_anchor = toc_item["id"]
-                            break
-                    content_parts.append(f'<section>')
-                    content_parts.append(f'<h2 id="{group_anchor}">{group}</h2>')
+            # Find matching TOC anchor
+            anchor = ""
+            for toc_item in toc:
+                if toc_item["title"] == title:
+                    anchor = toc_item["id"]
+                    break
+            if not anchor:
+                anchor = self._slugify(title)
 
-                # Find the matching TOC anchor for this subtopic
-                sub_anchor = ""
-                for toc_item in toc:
-                    for child in toc_item.get("children", []):
-                        if child["title"] == subtopic:
-                            sub_anchor = child["id"]
-                            break
-                    if sub_anchor:
-                        break
-
-                content_parts.append(f'<h3 id="{sub_anchor}">{subtopic}</h3>')
-                demoted = self._demote_headings(md_content)
-                html_content = markdown.markdown(
-                    demoted,
-                    extensions=['tables', 'fenced_code', 'toc']
-                )
-                content_parts.append(html_content)
-
-            if current_group is not None:
-                content_parts.append('</section>')
-                content_parts.append('<hr>')
-        else:
-            for chapter in chapters:
-                task = chapter["task"]
-                md_content = chapter["content"]
-                # Find matching TOC anchor
-                anchor = ""
-                for toc_item in toc:
-                    if toc_item["title"] == task.topic:
-                        anchor = toc_item["id"]
-                        break
-                if not anchor:
-                    anchor = self._slugify(task.topic)
-
-                content_parts.append(f'<section>')
-                content_parts.append(f'<h2 id="{anchor}">{task.topic}</h2>')
-                html_content = markdown.markdown(
-                    md_content,
-                    extensions=['tables', 'fenced_code', 'toc']
-                )
-                content_parts.append(html_content)
-                content_parts.append('</section>')
-                content_parts.append('<hr>')
+            content_parts.append(f'<section>')
+            content_parts.append(f'<h2 id="{anchor}">{title}</h2>')
+            html_content = markdown.markdown(
+                md_content,
+                extensions=['tables', 'fenced_code', 'toc']
+            )
+            content_parts.append(html_content)
+            content_parts.append('</section>')
+            content_parts.append('<hr>')
 
         # Conclusion
         if conclusion:

@@ -1,16 +1,25 @@
 """
 Research Orchestrator for Deep Research Agent
-Coordinates the entire research process
+Coordinates the entire research process using a 7-phase pipeline:
+  Phase 1: Deep Pre-Planning
+  Phase 2: Report Outline Design
+  Phase 3: Task Planning per Section
+  Phase 4: Research Execution
+  Phase 5: Gap Analysis & Fill
+  Phase 6: Section Synthesis
+  Phase 7: Report Compilation
 """
-import time
 import signal
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
-from .config import get_config, TaskStatus, ResearchTask, GlossaryTerm
+from .config import get_config, TaskStatus, SectionStatus, ResearchTask, GlossaryTerm
 from .database import get_database
-from .agents import PlannerAgent, ResearcherAgent, DiscoveryAgent, EditorAgent
+from .agents import (
+    PlannerAgent, ResearcherAgent, EditorAgent,
+    OutlineDesignerAgent, SectionTaskPlannerAgent, GapAnalysisAgent, SynthesisAgent,
+)
 from .compiler import ReportCompiler
 from .tools import save_markdown, read_file, count_words, count_citations, ensure_directory, generate_file_path
 from .logger import (
@@ -26,14 +35,17 @@ logger = get_logger(__name__)
 class ResearchOrchestrator:
     """
     Main orchestrator for the deep research process.
-    Coordinates planning, research, and compilation.
+    Coordinates planning, research, and compilation via a 7-phase pipeline.
     """
-    
+
     def __init__(self, register_signals: bool = True):
         self.db = get_database()
         self.planner = PlannerAgent()
         self.researcher = ResearcherAgent()
-        self.discovery = DiscoveryAgent()
+        self.outline_designer = OutlineDesignerAgent()
+        self.section_planner = SectionTaskPlannerAgent()
+        self.gap_analyst = GapAnalysisAgent()
+        self.synthesizer = SynthesisAgent()
         self.editor = EditorAgent()
         self.compiler = ReportCompiler()
 
@@ -56,30 +68,29 @@ class ResearchOrchestrator:
         """Handle shutdown signals gracefully"""
         print_warning("\nShutdown signal received. Completing current task...")
         self.is_running = False
-    
+
     def run(self, query: str, resume: bool = False) -> dict:
         """
-        Run the full research process
-        
+        Run the full research process via the 7-phase pipeline.
+
         Args:
             query: The research query/topic
             resume: Whether to resume an existing session
-        
+
         Returns:
             Dict with output file paths and statistics
         """
         self.query = query
         self.start_time = datetime.now()
         self.is_running = True
-        
+
         print_header(
             "Deep Research Agent",
             f"Starting comprehensive research on:\n{query[:100]}..."
         )
-        
+
         try:
-            # Phase 1: Initialize or Resume
-            self.phase = "planning"
+            # Initialize or Resume session
             if resume:
                 session = self._resume_session()
                 if not session:
@@ -87,51 +98,119 @@ class ResearchOrchestrator:
                     session = self._initialize_session(query)
             else:
                 session = self._initialize_session(query)
-            
+
             self.session_id = session.id
-            
-            # Phase 2: Research Loop
+
+            # Check if session already has sections (resume case)
+            existing_sections = self.db.get_all_sections(session_id=self.session_id)
+
+            if not existing_sections:
+                # Phase 1: Deep Pre-Planning
+                self.phase = "pre_planning"
+                print_info("Phase 1: Deep pre-planning...")
+                pre_plan_ctx = self.planner.run_pre_planning(query, self.session_id)
+
+                if not self.is_running:
+                    return self._emergency_compile()
+
+                # Phase 2: Report Outline
+                self.phase = "outline_design"
+                print_info("Phase 2: Designing report outline...")
+                sections = self.outline_designer.design_outline(query, pre_plan_ctx, self.session_id)
+                print_success(f"Designed outline with {len(sections)} sections")
+
+                if not self.is_running:
+                    return self._emergency_compile()
+
+                # Phase 3: Task Planning per Section
+                self.phase = "task_planning"
+                print_info("Phase 3: Planning research tasks per section...")
+                max_total = self.config.research.max_total_tasks
+                total_created = 0
+                for section in sections:
+                    if not self.is_running:
+                        break
+                    if total_created >= max_total:
+                        logger.warning(f"Reached max_total_tasks ({max_total}), skipping remaining sections")
+                        break
+                    tasks = self.section_planner.plan_tasks_for_section(
+                        section, sections, query, self.session_id,
+                        task_budget=max_total - total_created,
+                    )
+                    total_created += len(tasks)
+                    print_info(f"  {section.title}: {len(tasks)} tasks")
+
+                # Show task overview
+                all_tasks = self.db.get_all_tasks(session_id=self.session_id)
+                print_task_table(all_tasks)
+            else:
+                sections = existing_sections
+                print_info(f"Resuming with {len(sections)} existing sections")
+
+            if not self.is_running:
+                return self._emergency_compile()
+
+            # Phase 4: Research Execution
             self.phase = "researching"
+            print_info("Phase 4: Executing research tasks...")
             self._run_research_loop()
-            
-            # Phase 3: Compile Report
+
+            if not self.is_running:
+                return self._emergency_compile()
+
+            # Phase 5: Gap Analysis & Fill
+            self.phase = "gap_analysis"
+            print_info("Phase 5: Gap analysis...")
+            # Reload sections in case they were modified
+            sections = self.db.get_all_sections(session_id=self.session_id)
+            gap_result = self.gap_analyst.analyze_gaps(query, sections, self.session_id)
+            if gap_result.get("new_tasks", 0) > 0:
+                print_info(f"Gap analysis created {gap_result['new_tasks']} new tasks, "
+                          f"{gap_result.get('new_sections', 0)} new sections")
+                # Execute gap-fill research tasks
+                self.phase = "researching"
+                print_info("Executing gap-fill research tasks...")
+                self._run_research_loop()
+
+            if not self.is_running:
+                return self._emergency_compile()
+
+            # Phase 6: Section Synthesis
+            self.phase = "synthesizing"
+            print_info("Phase 6: Synthesizing sections...")
+            sections = self.db.get_all_sections(session_id=self.session_id)
+            self._synthesize_all_sections(query, sections)
+
+            # Phase 7: Compile
             self.phase = "compiling"
+            print_info("Phase 7: Compiling final report...")
             output_files = self._compile_final_report()
-            
-            # Phase 4: Cleanup and Statistics
+
+            # Cleanup and Statistics
             self.phase = "complete"
             return self._finalize(output_files)
-            
+
         except KeyboardInterrupt:
             print_warning("\nInterrupted by user.")
             return self._emergency_compile()
-            
+
         except Exception as e:
             logger.exception(f"Research failed: {e}")
             print_error(f"Research failed: {e}")
             return self._emergency_compile()
-    
+
     def _initialize_session(self, query: str):
         """Initialize a new research session"""
         print_info("Initializing new research session...")
-        
+
         # Create session in database
         session = self.db.create_session(query)
-        
+
         # Create output directory
         ensure_directory(self.config.output.directory)
-        
-        # Generate research plan
-        print_info("Planning research strategy...")
-        tasks = self.planner.create_plan(query, session.id)
-        
-        print_success(f"Created research plan with {len(tasks)} tasks")
-        
-        # Show task overview
-        print_task_table(tasks)
-        
+
         return session
-    
+
     def _resume_session(self):
         """Resume an existing research session"""
         session = self.db.get_current_session()
@@ -145,19 +224,19 @@ class ResearchOrchestrator:
                 if pending > 0:
                     self.db.update_session(recent.id, status="running", ended_at=None)
                     session = self.db.get_session_by_id(recent.id)
-        
+
         if session:
             print_info(f"Resuming session #{session.id}")
             print_info(f"Query: {session.query[:100]}...")
 
             stats = self.db.get_statistics(session_id=session.id)
             print_statistics_table(stats)
-            
+
             self.query = session.query
             return session
-        
+
         return None
-    
+
     def _execute_single_task(self, task, other_sections):
         """Execute a single research task. Thread-safe — called from worker threads."""
         print_task_start(task.topic, task.id)
@@ -270,13 +349,6 @@ class ResearchOrchestrator:
                             loop_count += 1
                             consecutive_failures = 0
 
-                            # Discovery step: run after every N completed tasks
-                            if (
-                                self.config.discovery.enabled
-                                and loop_count % self.config.discovery.frequency == 0
-                            ):
-                                self._run_discovery()
-
                         except Exception as e:
                             logger.error(f"Task {task.id} failed: {e}")
                             self.db.mark_task_failed(task.id, str(e))
@@ -301,25 +373,26 @@ class ResearchOrchestrator:
         # Final progress update
         stats = self.db.get_statistics(session_id=self.session_id)
         print_statistics_table(stats)
-    
+
     def _add_recursive_tasks(self, new_tasks: List[dict]):
         """Add new tasks discovered during research"""
         # Check if we're at task limit
         current_count = self.db.get_task_count(session_id=self.session_id)
         remaining_capacity = self.config.research.max_total_tasks - current_count
-        
+
         if remaining_capacity <= 0:
             print_warning("Task limit reached. Skipping new tasks.")
             return
-        
+
         # Limit new tasks to remaining capacity
         tasks_to_add = new_tasks[:remaining_capacity]
-        
+
         for i, task_data in enumerate(tasks_to_add, start=1):
             # Use an index to avoid file-path collisions for similarly named tasks.
             file_index = current_count + i
             task = ResearchTask(
                 parent_id=task_data.get("parent_id"),
+                section_id=task_data.get("section_id"),
                 topic=task_data["topic"],
                 description=task_data.get("description", ""),
                 file_path=generate_file_path(
@@ -331,7 +404,7 @@ class ResearchOrchestrator:
                 depth=task_data.get("depth", 1),
                 status=TaskStatus.PENDING
             )
-            
+
             self.db.add_task(task, self.session_id)
 
         # Keep denormalized session task count in sync with recursive additions.
@@ -339,9 +412,9 @@ class ResearchOrchestrator:
             self.session_id,
             total_tasks=self.db.get_task_count(session_id=self.session_id)
         )
-        
+
         print_info(f"Added {len(tasks_to_add)} new research tasks")
-    
+
     def _add_glossary_terms(self, terms: List[dict], task_id: int):
         """Add glossary terms discovered during research"""
         for term_data in terms:
@@ -351,360 +424,109 @@ class ResearchOrchestrator:
                 first_occurrence_task_id=task_id
             )
             self.db.add_glossary_term(term, session_id=self.session_id)
-    
-    def _run_discovery(self):
-        """Run the discovery agent to identify research gaps."""
-        print_info("Running discovery agent for gap analysis...")
 
-        all_tasks = self.db.get_all_tasks(session_id=self.session_id)
-        completed_tasks = [t for t in all_tasks if t.status == "completed"]
+    def _synthesize_all_sections(self, query: str, sections: list):
+        """Synthesize all sections in order, providing adjacent context."""
+        for i, section in enumerate(sections):
+            if not self.is_running:
+                break
 
-        if not completed_tasks:
-            return
-
-        # Build task list for discovery agent (include descriptions so
-        # the LLM can avoid suggesting overlapping topics)
-        task_list = [
-            {"topic": t.topic, "status": t.status, "description": t.description}
-            for t in all_tasks
-        ]
-
-        # Build summaries from completed sections
-        section_summaries = []
-        for t in completed_tasks:
-            content = read_file(t.file_path)
-            if not content:
+            # Skip already synthesized sections
+            if section.status == SectionStatus.COMPLETE.value or section.status == "complete":
+                print_info(f"  Section '{section.title}' already synthesized, skipping")
                 continue
-            words = content.split()
-            summary = " ".join(words[:300])
-            if len(words) > 300:
-                summary += " ..."
-            section_summaries.append({"topic": t.topic, "summary": summary})
 
-        new_tasks = self.discovery.discover_tasks(
-            query=self.query or "",
-            all_tasks=task_list,
-            section_summaries=section_summaries,
-            session_id=self.session_id
-        )
-
-        if new_tasks:
-            self._add_recursive_tasks(new_tasks)
-            print_info(f"Discovery agent suggested {len(new_tasks)} new tasks")
-        else:
-            print_info("Discovery agent found no significant gaps")
-
-    def _build_section_summaries(self, tasks) -> tuple:
-        """Build section summaries from completed task files.
-
-        Reads the first ~500 words of each section to give the editor
-        real content to synthesize rather than just topic names.
-
-        Returns (summaries, chapters) where chapters is a list of
-        {"task": task, "content": full_content} dicts for reuse by the compiler.
-        """
-        summaries = []
-        chapters = []
-        for task in tasks:
-            content = read_file(task.file_path)
-            if not content:
+            # Check if section has completed tasks
+            tasks = self.db.get_tasks_for_section(section.id)
+            completed = [t for t in tasks if t.status == "completed"]
+            if not completed:
+                print_warning(f"  Section '{section.title}' has no completed tasks, skipping")
                 continue
-            chapters.append({"task": task, "content": content})
-            # Take first ~500 words as a summary
-            words = content.split()
-            summary = " ".join(words[:500])
-            if len(words) > 500:
-                summary += " ..."
-            summaries.append({"topic": task.topic, "summary": summary})
-        return summaries, chapters
 
-    def _rewrite_sections(self, chapters: list) -> tuple:
-        """Reorder and rewrite sections for cohesion.
+            # Build adjacent section context
+            adjacent = {"previous": "", "next": ""}
 
-        Returns (rewritten_chapters, new_section_summaries).
-        """
-        print_info("Running editor rewrite pass...")
+            if i > 0:
+                prev = sections[i - 1]
+                if prev.synthesized_content:
+                    words = prev.synthesized_content.split()
+                    adjacent["previous"] = f"**{prev.title}**: " + " ".join(words[:200])
+                    if len(words) > 200:
+                        adjacent["previous"] += " ..."
 
-        # Step 1: Determine optimal section order
-        self.db.add_search_event(
-            session_id=self.session_id, task_id=None,
-            event_type="agent_action", query_group="reorder",
-            query_text="Determining optimal section order",
-        )
-        topics = [ch["task"].topic for ch in chapters]
-        # Build summaries so the ordering LLM can see content, not just names
-        ordering_summaries = []
-        for ch in chapters:
-            words = ch["content"].split()
-            summary = " ".join(words[:200])
-            if len(words) > 200:
-                summary += " ..."
-            ordering_summaries.append({"topic": ch["task"].topic, "summary": summary})
-        ordered_topics = self.editor.determine_section_order(
-            self.query or "", topics, section_summaries=ordering_summaries
-        )
+            if i < len(sections) - 1:
+                nxt = sections[i + 1]
+                adjacent["next"] = f"**{nxt.title}**: {nxt.description}"
 
-        # Reorder chapters to match
-        topic_to_chapter = {ch["task"].topic: ch for ch in chapters}
-        ordered_chapters = []
-        for topic in ordered_topics:
-            if topic in topic_to_chapter:
-                ordered_chapters.append(topic_to_chapter[topic])
-        # Append any chapters not in the ordered list (safety)
-        seen = set(ordered_topics)
-        for ch in chapters:
-            if ch["task"].topic not in seen:
-                ordered_chapters.append(ch)
-
-        print_info(f"Sections reordered: {len(ordered_chapters)} sections")
-
-        # Step 2: Rewrite each section with awareness of neighbors
-        toc = [ch["task"].topic for ch in ordered_chapters]
-        rewritten_chapters = []
-        preceding_summaries = []
-
-        for i, chapter in enumerate(ordered_chapters):
-            following_topics = toc[i + 1:]
-
-            self.db.add_search_event(
-                session_id=self.session_id, task_id=chapter["task"].id,
-                event_type="agent_action", query_group="rewrite",
-                query_text=f"Rewriting section: {chapter['task'].topic}",
-            )
-            rewritten_content = self.editor.rewrite_section(
-                query=self.query or "",
-                section_topic=chapter["task"].topic,
-                section_content=chapter["content"],
-                toc=toc,
-                preceding_summaries=preceding_summaries,
-                following_topics=following_topics,
+            print_info(f"  Synthesizing: {section.title}")
+            content = self.synthesizer.synthesize_section(
+                section, query, sections, adjacent, self.session_id
             )
 
-            task_obj = chapter["task"]
-            # Persist reordered sections to deterministic numbered files so all
-            # downstream consumers (compiler/web UI) share the same ordering.
-            target_file = generate_file_path(
-                task_obj.topic,
-                self.config.output.directory,
-                i + 1
-            )
-            save_markdown(target_file, rewritten_content, append=False)
-            if task_obj.file_path != target_file:
-                self.db.update_task(task_obj.id, file_path=target_file)
-                task_obj.file_path = target_file
-
-            rewritten_chapters.append({
-                "task": task_obj,
-                "content": rewritten_content,
-            })
-
-            # Build summary of this section for the next iteration
-            words = rewritten_content.split()
-            summary = " ".join(words[:500])
-            if len(words) > 500:
-                summary += " ..."
-            preceding_summaries.append({
-                "topic": chapter["task"].topic,
-                "summary": summary,
-            })
-
-            print_write(target_file, count_words(rewritten_content))
-
-        print_info("Editor rewrite pass complete")
-
-        # Rebuild section_summaries from rewritten content (used by _rewrite_sections)
-        section_summaries = []
-        for ch in rewritten_chapters:
-            words = ch["content"].split()
-            summary = " ".join(words[:500])
-            if len(words) > 500:
-                summary += " ..."
-            section_summaries.append({
-                "topic": ch["task"].topic,
-                "summary": summary,
-            })
-
-        return rewritten_chapters, section_summaries
-
-    def _restructure_sections(self, chapters: list, section_summaries: list) -> tuple:
-        """Group sections into topics and rewrite each within its group context.
-
-        Returns (restructured_chapters, new_section_summaries).
-        """
-        print_info("Running restructure pass (grouping + contextual rewrite)...")
-
-        # Phase 1: Grouping
-        self.db.add_search_event(
-            session_id=self.session_id, task_id=None,
-            event_type="agent_action", query_group="restructure_group",
-            query_text="Grouping sections into topic clusters",
-        )
-        groups = self.editor.group_sections_into_topics(
-            self.query or "", section_summaries
-        )
-        print_info(f"Grouped sections into {len(groups)} primary topics")
-
-        # Build lookup maps
-        topic_to_chapter = {ch["task"].topic: ch for ch in chapters}
-        topic_to_summary = {s["topic"]: s["summary"] for s in section_summaries}
-
-        # Build all-groups overview text for rewrite context
-        all_groups_text = ""
-        for g in groups:
-            subtopics = ", ".join(s["subtopic_title"] for s in g.get("sections", []))
-            all_groups_text += f"- **{g['title']}**: {subtopics}\n"
-
-        # Phase 2: Rewriting
-        restructured_chapters = []
-        file_index = 0
-
-        for group in groups:
-            group_title = group["title"]
-            group_sections = group.get("sections", [])
-
-            for sec_idx, section in enumerate(group_sections):
-                original_topic = section.get("original_topic", "")
-                subtopic_title = section.get("subtopic_title", original_topic)
-
-                chapter = topic_to_chapter.get(original_topic)
-                if not chapter:
-                    logger.warning(f"Restructure: no chapter found for topic '{original_topic}'; skipping")
-                    continue
-
-                file_index += 1
-
-                # Build preceding sibling context (sections before this one in group)
-                preceding_siblings = []
-                for sib in group_sections[:sec_idx]:
-                    sib_topic = sib.get("original_topic", "")
-                    sib_chapter = topic_to_chapter.get(sib_topic)
-                    if sib_chapter:
-                        sib_content = sib_chapter["content"]
-                        sib_words = sib_content.split()
-                        if len(sib_words) <= 600:
-                            context_text = sib_content
-                        else:
-                            context_text = " ".join(sib_words[:500]) + " ..."
-                    else:
-                        context_text = topic_to_summary.get(sib_topic, "")
-                    preceding_siblings.append({
-                        "subtopic_title": sib.get("subtopic_title", sib_topic),
-                        "content_or_summary": context_text,
-                    })
-
-                # Build following sibling titles (sections after this one in group)
-                following_sibling_titles = [
-                    sib.get("subtopic_title", sib.get("original_topic", ""))
-                    for sib in group_sections[sec_idx + 1:]
-                ]
-
-                # Build other-groups summary (all groups except current)
-                other_groups_lines = []
-                for g in groups:
-                    if g["title"] == group_title:
-                        continue
-                    subtopics = ", ".join(s["subtopic_title"] for s in g.get("sections", []))
-                    other_groups_lines.append(f"- **{g['title']}**: {subtopics}")
-                other_groups_summary = "\n".join(other_groups_lines)
-
-                # Rewrite
-                self.db.add_search_event(
-                    session_id=self.session_id, task_id=chapter["task"].id,
-                    event_type="agent_action", query_group="restructure_rewrite",
-                    query_text=f"Rewriting section in group '{group_title}': {subtopic_title}",
+            if content:
+                word_count = count_words(content)
+                citation_count = count_citations(content)
+                self.db.mark_section_synthesized(
+                    section.id, content, word_count, citation_count
                 )
-                rewritten_content = self.editor.rewrite_section_in_group(
-                    query=self.query or "",
-                    group_title=group_title,
-                    subtopic_title=subtopic_title,
-                    section_content=chapter["content"],
-                    full_toc=all_groups_text,
-                    preceding_siblings=preceding_siblings,
-                    following_sibling_titles=following_sibling_titles,
-                    other_groups_summary=other_groups_summary,
-                )
+                # Update section object for use in adjacent context
+                section.synthesized_content = content
+                print_info(f"    {word_count} words, {citation_count} citations")
 
-                # Save to numbered file and update task
-                task_obj = chapter["task"]
-                target_file = generate_file_path(
-                    task_obj.topic,
-                    self.config.output.directory,
-                    file_index,
-                )
-                save_markdown(target_file, rewritten_content, append=False)
-                if task_obj.file_path != target_file:
-                    self.db.update_task(task_obj.id, file_path=target_file)
-                    task_obj.file_path = target_file
-
-                restructured_chapters.append({
-                    "task": task_obj,
-                    "content": rewritten_content,
-                    "topic_group": group_title,
-                    "subtopic_title": subtopic_title,
-                })
-
-                # Update lookup so subsequent siblings see rewritten content
-                topic_to_chapter[original_topic] = {
-                    "task": task_obj,
-                    "content": rewritten_content,
-                }
-
-                print_write(target_file, count_words(rewritten_content))
-
-        print_info("Restructure pass complete")
-
-        # Rebuild section summaries using subtopic titles (matching report headings)
-        new_summaries = []
-        for ch in restructured_chapters:
-            words = ch["content"].split()
-            summary = " ".join(words[:500])
-            if len(words) > 500:
-                summary += " ..."
-            new_summaries.append({
-                "topic": ch.get("subtopic_title", ch["task"].topic),
-                "summary": summary,
-            })
-
-        return restructured_chapters, new_summaries
+        print_success("Section synthesis complete")
 
     def _compile_final_report(self) -> dict:
-        """Compile the final report"""
+        """Compile the final report from synthesized sections."""
         print_info("Compiling final report...")
 
-        # Get completed tasks and build section summaries (also pre-reads files)
-        tasks = self.db.get_all_tasks(TaskStatus.COMPLETED, session_id=self.session_id)
-        section_summaries, pre_read_chapters = self._build_section_summaries(tasks)
+        # Get all sections with synthesized content
+        sections = self.db.get_all_sections(session_id=self.session_id)
 
-        # Restructure takes precedence over rewrite (subsumes it)
-        if self.config.restructure.enabled and len(pre_read_chapters) > 1:
-            pre_read_chapters, section_summaries = self._restructure_sections(
-                pre_read_chapters, section_summaries
-            )
-        elif self.config.rewrite.enabled and len(pre_read_chapters) > 1:
-            pre_read_chapters, section_summaries = self._rewrite_sections(
-                pre_read_chapters
-            )
+        # Build chapters from synthesized sections
+        chapters = []
+        section_summaries = []
+        for section in sections:
+            content = section.synthesized_content
+            if not content:
+                # Fallback: try to read from task files (backward compatibility)
+                tasks = self.db.get_tasks_for_section(section.id)
+                completed = [t for t in tasks if t.status == "completed"]
+                task_contents = []
+                for t in completed:
+                    tc = read_file(t.file_path)
+                    if tc:
+                        task_contents.append(tc)
+                if task_contents:
+                    content = "\n\n---\n\n".join(task_contents)
+
+            if content:
+                chapters.append({
+                    "section": section,
+                    "content": content,
+                })
+                # Build summary for exec summary/conclusion
+                words = content.split()
+                summary = " ".join(words[:500])
+                if len(words) > 500:
+                    summary += " ..."
+                section_summaries.append({
+                    "topic": section.title,
+                    "summary": summary,
+                })
+
+        # If no sections exist (old-style session), fall back to task-based compilation
+        if not chapters:
+            return self._compile_task_based_report()
 
         # Generate executive summary and conclusion in parallel
         executive_summary = None
         conclusion = None
-        # Calculate word count from actual (possibly rewritten) content, not stale DB values
-        total_words = sum(count_words(ch["content"]) for ch in pre_read_chapters)
+        total_words = sum(count_words(ch["content"]) for ch in chapters)
 
-        # Build report structure description for exec summary / conclusion
-        # when restructured, convey the group hierarchy
-        report_structure = ""
-        if any(ch.get("topic_group") for ch in pre_read_chapters):
-            current_group = None
-            structure_lines = []
-            for ch in pre_read_chapters:
-                group = ch.get("topic_group", "")
-                subtopic = ch.get("subtopic_title", ch["task"].topic)
-                if group != current_group:
-                    current_group = group
-                    structure_lines.append(f"- **{group}**")
-                structure_lines.append(f"  - {subtopic}")
-            report_structure = "\n".join(structure_lines)
+        # Build report structure
+        report_structure = "\n".join(
+            f"{s.position}. {s.title}" for s in sections if s.synthesized_content
+        )
 
         with ThreadPoolExecutor(max_workers=2) as comp_executor:
             futures = {}
@@ -740,18 +562,18 @@ class ResearchOrchestrator:
                         conclusion = result
                 except Exception as e:
                     logger.warning(f"Failed to generate {label}: {e}")
-        
+
         # Calculate duration
         duration_seconds = (datetime.now() - self.start_time).total_seconds()
-        
-        # Compile report (pass pre-read chapters to avoid re-reading files)
+
+        # Compile report
         output_files = self.compiler.compile_report(
             self.query,
             executive_summary,
             conclusion,
             duration_seconds,
             session_id=self.session_id,
-            pre_read_chapters=pre_read_chapters
+            pre_read_chapters=chapters
         )
 
         # Store report artifacts on session
@@ -765,14 +587,83 @@ class ResearchOrchestrator:
             )
 
         return output_files
-    
+
+    def _compile_task_based_report(self) -> dict:
+        """Fallback: compile report from tasks directly (for old sessions without sections)."""
+        tasks = self.db.get_all_tasks(TaskStatus.COMPLETED, session_id=self.session_id)
+
+        chapters = []
+        section_summaries = []
+        for task in tasks:
+            content = read_file(task.file_path)
+            if content:
+                chapters.append({"task": task, "content": content})
+                words = content.split()
+                summary = " ".join(words[:500])
+                if len(words) > 500:
+                    summary += " ..."
+                section_summaries.append({"topic": task.topic, "summary": summary})
+
+        chapters.sort(key=lambda x: x["task"].file_path)
+
+        # Generate exec summary and conclusion
+        executive_summary = None
+        conclusion = None
+        total_words = sum(count_words(ch["content"]) for ch in chapters)
+
+        with ThreadPoolExecutor(max_workers=2) as comp_executor:
+            futures = {}
+            if self.config.output.include_summary and section_summaries:
+                futures[comp_executor.submit(
+                    self.editor.generate_executive_summary,
+                    self.query, section_summaries, ""
+                )] = 'summary'
+            if section_summaries:
+                futures[comp_executor.submit(
+                    self.editor.generate_conclusion,
+                    self.query, section_summaries, total_words, ""
+                )] = 'conclusion'
+
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    result = future.result()
+                    if label == 'summary':
+                        executive_summary = result
+                    else:
+                        conclusion = result
+                except Exception as e:
+                    logger.warning(f"Failed to generate {label}: {e}")
+
+        duration_seconds = (datetime.now() - self.start_time).total_seconds()
+
+        output_files = self.compiler.compile_report(
+            self.query,
+            executive_summary,
+            conclusion,
+            duration_seconds,
+            session_id=self.session_id,
+            pre_read_chapters=chapters
+        )
+
+        if self.session_id:
+            self.db.update_session(
+                self.session_id,
+                executive_summary=executive_summary,
+                conclusion=conclusion,
+                report_markdown_path=output_files.get("markdown"),
+                report_html_path=output_files.get("html"),
+            )
+
+        return output_files
+
     def _emergency_compile(self) -> dict:
         """Emergency compile when interrupted"""
         print_warning("Performing emergency compile of completed work...")
-        
+
         try:
             duration_seconds = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
-            
+
             output_files = self.compiler.compile_report(
                 self.query or "Interrupted Research",
                 None,  # No executive summary
@@ -780,13 +671,13 @@ class ResearchOrchestrator:
                 duration_seconds,
                 session_id=self.session_id
             )
-            
+
             return self._finalize(output_files)
-            
+
         except Exception as e:
             logger.error(f"Emergency compile failed: {e}")
             return {"error": str(e)}
-    
+
     def _finalize(self, output_files: dict) -> dict:
         """Finalize the research session"""
 
@@ -819,7 +710,7 @@ class ResearchOrchestrator:
                 status=status,
                 ended_at=datetime.now(timezone.utc)
             )
-        
+
         # Print completion summary
         print_completion_summary(
             total_tasks=stats["total_tasks"],
@@ -833,12 +724,12 @@ class ResearchOrchestrator:
                 f"Run finished with {stats['pending_tasks']} pending task(s). "
                 "Resume to continue remaining work."
             )
-        
+
         # Print output file locations
         console.print("\n[bold cyan]Output Files:[/bold cyan]")
         for fmt, path in output_files.items():
-            console.print(f"  • {fmt}: {path}")
-        
+            console.print(f"  \u2022 {fmt}: {path}")
+
         return {
             "output_files": output_files,
             "statistics": stats,
@@ -849,11 +740,11 @@ class ResearchOrchestrator:
 def run_research(query: str, resume: bool = False) -> dict:
     """
     Main entry point for running research
-    
+
     Args:
         query: The research query/topic
         resume: Whether to resume an existing session
-    
+
     Returns:
         Dict with output files and statistics
     """

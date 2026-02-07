@@ -13,7 +13,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, backref, sessionmaker
 
 from .config import (
-    get_config, TaskStatus, ResearchTask, Source, GlossaryTerm, ResearchSession
+    get_config, TaskStatus, SectionStatus, ResearchTask, ReportSection,
+    Source, GlossaryTerm, ResearchSession
 )
 
 Base = declarative_base()
@@ -36,10 +37,11 @@ task_source_association = Table(
 class TaskModel(Base):
     """SQLAlchemy model for research tasks"""
     __tablename__ = 'tasks'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     parent_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
     session_id = Column(Integer, ForeignKey('sessions.id'), nullable=True)
+    section_id = Column(Integer, ForeignKey('sections.id'), nullable=True)
     topic = Column(String(500), nullable=False)
     description = Column(Text, nullable=False)
     file_path = Column(String(500), nullable=False)
@@ -48,6 +50,7 @@ class TaskModel(Base):
     depth = Column(Integer, default=0)
     word_count = Column(Integer, default=0)
     citation_count = Column(Integer, default=0)
+    is_gap_fill = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
@@ -56,12 +59,13 @@ class TaskModel(Base):
     # Relationships
     children = relationship("TaskModel", backref=backref("parent", remote_side="TaskModel.id"), foreign_keys=[parent_id])
     sources = relationship("SourceModel", secondary=task_source_association, back_populates="tasks")
-    
+
     def to_pydantic(self) -> ResearchTask:
         return ResearchTask(
             id=self.id,
             parent_id=self.parent_id,
             session_id=self.session_id,
+            section_id=self.section_id,
             topic=self.topic,
             description=self.description,
             file_path=self.file_path,
@@ -70,6 +74,7 @@ class TaskModel(Base):
             depth=self.depth,
             word_count=self.word_count,
             citation_count=self.citation_count,
+            is_gap_fill=self.is_gap_fill or False,
             created_at=self.created_at,
             completed_at=self.completed_at,
             error_message=self.error_message,
@@ -144,6 +149,40 @@ class SearchEventModel(Base):
     snippet = Column(Text, nullable=True)
     quality_score = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SectionModel(Base):
+    """SQLAlchemy model for report sections"""
+    __tablename__ = 'sections'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Integer, ForeignKey('sessions.id'), nullable=True)
+    title = Column(String(500), nullable=False)
+    description = Column(Text, nullable=True, default="")
+    position = Column(Integer, default=0)
+    status = Column(String(20), default='planned')
+    synthesized_content = Column(Text, nullable=True)
+    word_count = Column(Integer, default=0)
+    citation_count = Column(Integer, default=0)
+    is_gap_fill = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    synthesized_at = Column(DateTime, nullable=True)
+
+    def to_pydantic(self) -> ReportSection:
+        return ReportSection(
+            id=self.id,
+            session_id=self.session_id,
+            title=self.title,
+            description=self.description or "",
+            position=self.position,
+            status=SectionStatus(self.status),
+            synthesized_content=self.synthesized_content,
+            word_count=self.word_count,
+            citation_count=self.citation_count,
+            is_gap_fill=self.is_gap_fill or False,
+            created_at=self.created_at,
+            synthesized_at=self.synthesized_at,
+        )
 
 
 class SessionModel(Base):
@@ -226,6 +265,7 @@ class DatabaseManager:
         self._migrate_glossary_columns()
         self._migrate_association_columns()
         self._migrate_task_columns()
+        self._migrate_section_tables()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -277,6 +317,21 @@ class DatabaseManager:
                     "ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0"
                 ))
                 conn.commit()
+
+    def _migrate_section_tables(self):
+        """Add section_id and is_gap_fill columns to tasks for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "section_id" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE tasks ADD COLUMN section_id INTEGER REFERENCES sections(id)"
+                ))
+            if "is_gap_fill" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE tasks ADD COLUMN is_gap_fill BOOLEAN DEFAULT 0"
+                ))
+            conn.commit()
 
     def get_sync_session(self):
         """Get a synchronous session"""
@@ -338,12 +393,14 @@ class DatabaseManager:
             db_task = TaskModel(
                 parent_id=task.parent_id,
                 session_id=session_id,
+                section_id=task.section_id,
                 topic=task.topic,
                 description=task.description,
                 file_path=task.file_path,
                 status=task.status.value if isinstance(task.status, TaskStatus) else task.status,
                 priority=task.priority,
                 depth=task.depth,
+                is_gap_fill=task.is_gap_fill,
                 created_at=datetime.now(timezone.utc)
             )
             session.add(db_task)
@@ -359,12 +416,14 @@ class DatabaseManager:
                 db_task = TaskModel(
                     parent_id=task.parent_id,
                     session_id=session_id,
+                    section_id=task.section_id,
                     topic=task.topic,
                     description=task.description,
                     file_path=task.file_path,
                     status=task.status.value if isinstance(task.status, TaskStatus) else task.status,
                     priority=task.priority,
                     depth=task.depth,
+                    is_gap_fill=task.is_gap_fill,
                     created_at=datetime.now(timezone.utc)
                 )
                 session.add(db_task)
@@ -538,6 +597,102 @@ class DatabaseManager:
             if session_id is not None:
                 query = query.filter(TaskModel.session_id == session_id)
             results = query.order_by(TaskModel.completed_at.desc()).limit(limit).all()
+            return [r.to_pydantic() for r in results]
+
+    # =========================================================================
+    # SECTION OPERATIONS
+    # =========================================================================
+
+    def add_section(self, section: ReportSection, session_id: int = None) -> ReportSection:
+        """Add a new report section"""
+        with self.get_sync_session() as session:
+            db_section = SectionModel(
+                session_id=session_id,
+                title=section.title,
+                description=section.description,
+                position=section.position,
+                status=section.status.value if isinstance(section.status, SectionStatus) else section.status,
+                is_gap_fill=section.is_gap_fill,
+                created_at=datetime.now(timezone.utc)
+            )
+            session.add(db_section)
+            session.commit()
+            session.refresh(db_section)
+            return db_section.to_pydantic()
+
+    def add_sections_bulk(self, sections: List[ReportSection], session_id: int = None) -> List[ReportSection]:
+        """Add multiple sections at once"""
+        with self.get_sync_session() as session:
+            db_sections = []
+            for sec in sections:
+                db_section = SectionModel(
+                    session_id=session_id,
+                    title=sec.title,
+                    description=sec.description,
+                    position=sec.position,
+                    status=sec.status.value if isinstance(sec.status, SectionStatus) else sec.status,
+                    is_gap_fill=sec.is_gap_fill,
+                    created_at=datetime.now(timezone.utc)
+                )
+                session.add(db_section)
+                db_sections.append(db_section)
+            session.commit()
+            for db_section in db_sections:
+                session.refresh(db_section)
+            return [s.to_pydantic() for s in db_sections]
+
+    def get_all_sections(self, session_id: int = None) -> List[ReportSection]:
+        """Get all sections, optionally filtered by session, ordered by position"""
+        with self.get_sync_session() as session:
+            query = session.query(SectionModel)
+            if session_id is not None:
+                query = query.filter(SectionModel.session_id == session_id)
+            results = query.order_by(SectionModel.position).all()
+            return [r.to_pydantic() for r in results]
+
+    def update_section(self, section_id: int, **kwargs) -> bool:
+        """Update section fields"""
+        with self.get_sync_session() as session:
+            for key, value in kwargs.items():
+                if isinstance(value, SectionStatus):
+                    kwargs[key] = value.value
+            result = session.query(SectionModel).filter(
+                SectionModel.id == section_id
+            ).update(kwargs)
+            session.commit()
+            return result > 0
+
+    def mark_section_synthesized(self, section_id: int, content: str, word_count: int = 0, citation_count: int = 0):
+        """Mark a section as synthesized with its content"""
+        self.update_section(
+            section_id,
+            status=SectionStatus.COMPLETE.value,
+            synthesized_content=content,
+            word_count=word_count,
+            citation_count=citation_count,
+            synthesized_at=datetime.now(timezone.utc)
+        )
+
+    def get_tasks_for_section(self, section_id: int) -> List[ResearchTask]:
+        """Get all tasks assigned to a section"""
+        with self.get_sync_session() as session:
+            results = session.query(TaskModel).filter(
+                TaskModel.section_id == section_id
+            ).order_by(TaskModel.id).all()
+            return [r.to_pydantic() for r in results]
+
+    def get_sources_for_section(self, section_id: int) -> List[Source]:
+        """Get all sources linked to tasks in a section, ordered by position"""
+        with self.get_sync_session() as session:
+            results = session.query(SourceModel).join(
+                task_source_association,
+                SourceModel.id == task_source_association.c.source_id
+            ).join(
+                TaskModel,
+                TaskModel.id == task_source_association.c.task_id
+            ).filter(
+                TaskModel.section_id == section_id
+            ).order_by(task_source_association.c.position).distinct().all()
             return [r.to_pydantic() for r in results]
 
     # =========================================================================

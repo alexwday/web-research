@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
-from src.config import TaskStatus, ResearchSession, RESEARCH_PRESETS
+from src.config import TaskStatus, SectionStatus, ResearchSession, RESEARCH_PRESETS
 from src.database import get_database
 from src.llm_client import get_token_tracker
 from src.tools import read_file
@@ -84,7 +84,7 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
                 "planning",
                 {
                     "phase_key": "planning",
-                    "phase_label": "Planning Phase",
+                    "phase_label": "Pre-Planning Phase",
                     "queries": [],
                     "query_count": 0,
                     "result_count": 0,
@@ -104,7 +104,7 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
                 "compilation",
                 {
                     "phase_key": "compilation",
-                    "phase_label": "Compilation Phase",
+                    "phase_label": "Synthesis & Compilation Phase",
                     "queries": [],
                     "query_count": 0,
                     "result_count": 0,
@@ -308,16 +308,58 @@ async def sources_page(request: Request, session: Optional[int] = None):
 def _build_report_sections(session_id: int = None):
     """Build sorted report sections with globally-remapped citations.
 
-    Returns (sections, global_sources) where citations in each section's
-    HTML match the global bibliography numbering.
+    Supports both section-based sessions (new pipeline with synthesized
+    sections) and task-based sessions (legacy). Returns (sections,
+    global_sources) where citations in each section's HTML match the
+    global bibliography numbering.
     """
     import re
     _CITATION_RE = re.compile(r'(?<!\])\[(\d+)\](?!\()')
 
     db = _db()
+
+    # Check for section-based session first (new pipeline)
+    db_sections = db.get_all_sections(session_id=session_id) if session_id else []
+    synthesized = [s for s in db_sections if s.synthesized_content]
+
+    if synthesized:
+        # Section-based: use synthesized content from sections
+        global_sources = []
+        url_to_global = {}
+
+        sections = []
+        for sec in sorted(synthesized, key=lambda s: s.position):
+            section_sources = db.get_sources_for_section(sec.id)
+
+            local_to_global = {}
+            for local_idx, source in enumerate(section_sources, 1):
+                if source.url not in url_to_global:
+                    global_sources.append(source)
+                    url_to_global[source.url] = len(global_sources)
+                local_to_global[local_idx] = url_to_global[source.url]
+
+            content = sec.synthesized_content
+            if local_to_global:
+                def _replace(match, mapping=local_to_global):
+                    local_num = int(match.group(1))
+                    return f"[{mapping.get(local_num, local_num)}]"
+                content = _CITATION_RE.sub(_replace, content)
+
+            html = md.markdown(content, extensions=["tables", "fenced_code", "toc"])
+            sections.append({
+                "id": sec.id,
+                "topic": sec.title,
+                "html": html,
+                "word_count": sec.word_count or 0,
+                "citation_count": sec.citation_count or 0,
+                "priority": sec.position,
+            })
+
+        return sections, global_sources
+
+    # Fallback: task-based (legacy sessions)
     tasks = db.get_all_tasks(TaskStatus.COMPLETED, session_id=session_id)
 
-    # First pass: read content and collect per-task sources
     raw_sections = []
     for task in tasks:
         content = read_file(task.file_path)
@@ -332,18 +374,15 @@ def _build_report_sections(session_id: int = None):
                 "file_path": task.file_path,
             })
 
-    # Match compiler ordering (numeric prefix in file path).
     raw_sections.sort(key=lambda s: s["file_path"])
 
-    # Build global deduplicated source list and remap citations
     global_sources = []
-    url_to_global = {}  # url -> 1-indexed global number
+    url_to_global = {}
 
     sections = []
     for section in raw_sections:
         task_sources = db.get_sources_for_task(section["id"])
 
-        # Build local-to-global mapping for this section
         local_to_global = {}
         for local_idx, source in enumerate(task_sources, 1):
             if source.url not in url_to_global:
@@ -351,7 +390,6 @@ def _build_report_sections(session_id: int = None):
                 url_to_global[source.url] = len(global_sources)
             local_to_global[local_idx] = url_to_global[source.url]
 
-        # Remap citations in markdown content before converting to HTML
         content = section["content"]
         if local_to_global:
             def _replace(match, mapping=local_to_global):
