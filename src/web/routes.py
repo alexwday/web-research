@@ -6,7 +6,9 @@ Covers:
 - JSON API endpoints
 - HTMX fragment endpoints (polled every 5s)
 """
-from datetime import datetime
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from collections import OrderedDict
@@ -17,7 +19,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
-from src.config import TaskStatus, SectionStatus, ResearchSession, RESEARCH_PRESETS
+from src.config import TaskStatus, SectionStatus, ResearchSession, RESEARCH_PRESETS, get_config
 from src.database import get_database
 from src.llm_client import get_token_tracker
 from src.tools import read_file
@@ -26,6 +28,22 @@ router = APIRouter()
 
 _templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
+
+
+# =========================================================================
+# Token store for query refinement flow (in-memory, transient)
+# =========================================================================
+
+_refine_tokens: dict = {}
+_REFINE_TOKEN_TTL_MINUTES = 10
+
+
+def _cleanup_refine_tokens():
+    """Remove expired refinement tokens (lazy cleanup)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_REFINE_TOKEN_TTL_MINUTES)
+    expired = [k for k, v in _refine_tokens.items() if v.get("created_at", cutoff) < cutoff]
+    for k in expired:
+        del _refine_tokens[k]
 
 
 # =========================================================================
@@ -242,6 +260,8 @@ async def dashboard(request: Request, session: Optional[int] = None):
         elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
     activity_log = _build_activity_log_context(sid)
 
+    refinement_enabled = get_config().query_refinement.enabled
+
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "session": resolved,
@@ -254,6 +274,7 @@ async def dashboard(request: Request, session: Optional[int] = None):
         "phase": phase,
         "current_tasks": current_tasks,
         "elapsed_seconds": elapsed_seconds,
+        "refinement_enabled": refinement_enabled,
         **activity_log,
     })
 
@@ -613,6 +634,159 @@ async def api_research_start(request: Request):
 async def api_research_stop():
     stopped = _app().stop_research()
     return {"status": "stopping" if stopped else "not_running"}
+
+
+# =========================================================================
+# Query Refinement endpoints
+# =========================================================================
+
+@router.post("/api/research/refine")
+async def api_research_refine(request: Request):
+    """Accept query + settings, generate questions via LLM, return redirect URL."""
+    _cleanup_refine_tokens()
+
+    content_type = request.headers.get("content-type", "")
+    if "json" in content_type:
+        body = await request.json()
+        query = body.get("query", "").strip()
+        preset_name = body.get("preset", "")
+        raw_fields = body
+    else:
+        form = await request.form()
+        query = form.get("query", "").strip()
+        preset_name = form.get("preset", "")
+        raw_fields = {}
+        for key in form.keys():
+            if "." in key:
+                raw_fields[key] = form.getlist(key)[-1]
+
+    if not query:
+        raise HTTPException(400, "Query is required")
+
+    # Build overrides
+    overrides = {}
+    if preset_name and preset_name in RESEARCH_PRESETS:
+        overrides.update(RESEARCH_PRESETS[preset_name]["overrides"])
+    for key, value in raw_fields.items():
+        if "." in key and key.split(".")[0] in ("research", "search"):
+            overrides[key] = value
+
+    # Generate questions via LLM
+    from src.agents import QueryRefinementAgent
+    agent = QueryRefinementAgent()
+    questions = agent.generate_questions(query)
+
+    # Store in token
+    token = uuid.uuid4().hex
+    _refine_tokens[token] = {
+        "query": query,
+        "preset": preset_name,
+        "overrides": overrides,
+        "questions": questions,
+        "answers": None,
+        "brief": None,
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    return RedirectResponse(url=f"/refine?token={token}", status_code=303)
+
+
+@router.get("/refine", response_class=HTMLResponse)
+async def refine_page(request: Request, token: str = "", step: Optional[str] = None):
+    """Render questions (default) or brief review based on token state."""
+    if not token or token not in _refine_tokens:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    data = _refine_tokens[token]
+
+    # Allow explicit step override (e.g. "Back to Questions" link)
+    if step == "questions":
+        step = "questions"
+    elif data.get("brief"):
+        step = "brief"
+    else:
+        step = "questions"
+
+    return templates.TemplateResponse("refine.html", {
+        "request": request,
+        "token": token,
+        "query": data["query"],
+        "questions": data.get("questions", []),
+        "brief": data.get("brief", ""),
+        "step": step,
+        "page": "dashboard",
+    })
+
+
+@router.post("/api/research/brief")
+async def api_research_brief(request: Request):
+    """Accept answers, generate brief via LLM, redirect to /refine."""
+    form = await request.form()
+    token = form.get("token", "")
+
+    if not token or token not in _refine_tokens:
+        raise HTTPException(400, "Invalid or expired refinement token")
+
+    data = _refine_tokens[token]
+    questions = data.get("questions", [])
+
+    # Collect answers from form
+    qa_pairs = []
+    for i, q in enumerate(questions):
+        answer = form.get(f"answer_{i}", "").strip()
+        custom = form.get(f"custom_{i}", "").strip()
+        # Custom answer takes precedence if provided
+        final_answer = custom if custom else answer
+        if final_answer:
+            qa_pairs.append({
+                "question": q["question"],
+                "answer": final_answer,
+            })
+
+    # Store answers
+    data["answers"] = qa_pairs
+
+    # Generate brief via LLM
+    from src.agents import QueryRefinementAgent
+    agent = QueryRefinementAgent()
+    brief = agent.synthesize_brief(data["query"], qa_pairs)
+    data["brief"] = brief
+
+    return RedirectResponse(url=f"/refine?token={token}", status_code=303)
+
+
+@router.post("/api/research/start-refined")
+async def api_research_start_refined(request: Request):
+    """Accept final brief, start research, redirect to dashboard."""
+    form = await request.form()
+    token = form.get("token", "")
+
+    if not token or token not in _refine_tokens:
+        raise HTTPException(400, "Invalid or expired refinement token")
+
+    data = _refine_tokens[token]
+    # Allow user to edit the brief in the textarea
+    brief = form.get("brief", data.get("brief", "")).strip()
+    query = data["query"]
+    overrides = data.get("overrides") or None
+
+    # Build refinement_qa JSON string
+    refinement_qa = json.dumps(data.get("answers") or [])
+
+    started = _app().start_research_background(
+        query,
+        overrides=overrides,
+        refined_brief=brief,
+        refinement_qa=refinement_qa,
+    )
+
+    # Clean up token
+    _refine_tokens.pop(token, None)
+
+    if not started:
+        raise HTTPException(409, "Research is already running")
+
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 # =========================================================================

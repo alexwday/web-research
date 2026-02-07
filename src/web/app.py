@@ -25,7 +25,9 @@ def is_research_running() -> bool:
         return _research_thread is not None and _research_thread.is_alive()
 
 
-def start_research_background(query: str, overrides: dict = None) -> bool:
+def start_research_background(query: str, overrides: dict = None,
+                              refined_brief: str = None,
+                              refinement_qa: str = None) -> bool:
     """
     Launch a research run in a daemon thread.
     Returns False if research is already running.
@@ -58,7 +60,11 @@ def start_research_background(query: str, overrides: dict = None) -> bool:
             orchestrator = ResearchOrchestrator(register_signals=False)
             _current_orchestrator = orchestrator
             try:
-                orchestrator.run(query)
+                orchestrator.run(
+                    query,
+                    refined_brief=refined_brief,
+                    refinement_qa=refinement_qa,
+                )
             except Exception as e:
                 from src.logger import get_logger
                 get_logger(__name__).exception(

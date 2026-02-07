@@ -202,6 +202,8 @@ class SessionModel(Base):
     conclusion = Column(Text, nullable=True)
     report_markdown_path = Column(String(500), nullable=True)
     report_html_path = Column(String(500), nullable=True)
+    refined_brief = Column(Text, nullable=True)
+    refinement_qa = Column(Text, nullable=True)
 
     def to_pydantic(self) -> ResearchSession:
         return ResearchSession(
@@ -218,6 +220,8 @@ class SessionModel(Base):
             conclusion=self.conclusion,
             report_markdown_path=self.report_markdown_path,
             report_html_path=self.report_html_path,
+            refined_brief=self.refined_brief,
+            refinement_qa=self.refinement_qa,
         )
 
 
@@ -266,6 +270,7 @@ class DatabaseManager:
         self._migrate_association_columns()
         self._migrate_task_columns()
         self._migrate_section_tables()
+        self._migrate_refinement_columns()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -331,6 +336,22 @@ class DatabaseManager:
                 conn.execute(text(
                     "ALTER TABLE tasks ADD COLUMN is_gap_fill BOOLEAN DEFAULT 0"
                 ))
+            conn.commit()
+
+    def _migrate_refinement_columns(self):
+        """Add refined_brief and refinement_qa columns to sessions for existing databases."""
+        new_columns = {
+            "refined_brief": "TEXT",
+            "refinement_qa": "TEXT",
+        }
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(sessions)")).fetchall()
+            existing = {row[1] for row in rows}
+            for col_name, col_type in new_columns.items():
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type}"
+                    ))
             conn.commit()
 
     def get_sync_session(self):

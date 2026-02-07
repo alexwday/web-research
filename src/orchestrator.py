@@ -69,18 +69,21 @@ class ResearchOrchestrator:
         print_warning("\nShutdown signal received. Completing current task...")
         self.is_running = False
 
-    def run(self, query: str, resume: bool = False) -> dict:
+    def run(self, query: str, resume: bool = False,
+            refined_brief: str = None, refinement_qa: str = None) -> dict:
         """
         Run the full research process via the 7-phase pipeline.
 
         Args:
             query: The research query/topic
             resume: Whether to resume an existing session
+            refined_brief: Optional enhanced research brief from query refinement
+            refinement_qa: Optional JSON string of Q&A pairs from refinement
 
         Returns:
             Dict with output file paths and statistics
         """
-        self.query = query
+        self.query = refined_brief or query
         self.start_time = datetime.now()
         self.is_running = True
 
@@ -95,9 +98,13 @@ class ResearchOrchestrator:
                 session = self._resume_session()
                 if not session:
                     print_info("No existing session found. Starting fresh.")
-                    session = self._initialize_session(query)
+                    session = self._initialize_session(
+                        query, refined_brief=refined_brief,
+                        refinement_qa=refinement_qa)
             else:
-                session = self._initialize_session(query)
+                session = self._initialize_session(
+                    query, refined_brief=refined_brief,
+                    refinement_qa=refinement_qa)
 
             self.session_id = session.id
 
@@ -199,12 +206,21 @@ class ResearchOrchestrator:
             print_error(f"Research failed: {e}")
             return self._emergency_compile()
 
-    def _initialize_session(self, query: str):
+    def _initialize_session(self, query: str, refined_brief: str = None,
+                            refinement_qa: str = None):
         """Initialize a new research session"""
         print_info("Initializing new research session...")
 
         # Create session in database
         session = self.db.create_session(query)
+
+        # Store refinement data if provided
+        if refined_brief or refinement_qa:
+            self.db.update_session(
+                session.id,
+                refined_brief=refined_brief,
+                refinement_qa=refinement_qa,
+            )
 
         # Create output directory
         ensure_directory(self.config.output.directory)

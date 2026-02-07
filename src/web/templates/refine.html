@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Refine Query – Deep Research Agent{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Refine Your Query</h1>
+
+<!-- Original query (always visible) -->
+<div class="refine-query-box">
+    <strong>Original Query:</strong> {{ query }}
+</div>
+
+{% if step == "questions" %}
+<!-- Step 1: Questions -->
+<form action="/api/research/brief" method="post">
+    <input type="hidden" name="token" value="{{ token }}">
+
+    {% for q in questions %}
+    <div class="refine-question">
+        <h3>{{ loop.index }}. {{ q.question }}</h3>
+        <div class="refine-options">
+            {% for opt in q.options %}
+            <label class="refine-option">
+                <input type="radio" name="answer_{{ loop.parent.loop.index0 }}" value="{{ opt }}">
+                <span>{{ opt }}</span>
+            </label>
+            {% endfor %}
+            <div class="refine-custom-input">
+                <label class="refine-option">
+                    <input type="radio" name="answer_{{ loop.index0 }}" value="">
+                    <span>Other:</span>
+                </label>
+                <input type="text" name="custom_{{ loop.index0 }}"
+                       class="refine-custom-text"
+                       placeholder="Type your own answer..."
+                       onfocus="this.previousElementSibling.querySelector('input[type=radio]').checked=true">
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    <div class="refine-actions">
+        <button type="submit" class="btn btn-primary">Generate Brief</button>
+        <a href="#" class="btn-ghost" id="skip-refine-btn">Skip, start immediately</a>
+    </div>
+</form>
+
+<!-- Hidden form for skip path: starts research with original query, no brief -->
+<form id="skip-form" action="/api/research/start-refined" method="post" style="display:none">
+    <input type="hidden" name="token" value="{{ token }}">
+    <input type="hidden" name="brief" value="">
+</form>
+<script>
+document.getElementById('skip-refine-btn').addEventListener('click', function(e) {
+    e.preventDefault();
+    document.getElementById('skip-form').submit();
+});
+</script>
+
+{% elif step == "brief" %}
+<!-- Step 2: Review Brief -->
+<form action="/api/research/start-refined" method="post">
+    <input type="hidden" name="token" value="{{ token }}">
+
+    <div class="refine-brief-section">
+        <label for="brief-textarea"><strong>Enhanced Research Brief</strong> (editable):</label>
+        <textarea id="brief-textarea" name="brief" class="refine-brief-textarea"
+                  rows="12">{{ brief }}</textarea>
+    </div>
+
+    <div class="refine-actions">
+        <button type="submit" class="btn btn-primary">Start Research</button>
+        <a href="/refine?token={{ token }}&step=questions" class="btn-ghost">Back to Questions</a>
+    </div>
+</form>
+{% endif %}
+
+{% endblock %}

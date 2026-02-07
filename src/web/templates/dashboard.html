@@ -15,14 +15,27 @@
 </form>
 {% else %}
 <form id="start-form"
+      {% if refinement_enabled %}
+      action="/api/research/refine" method="post"
+      {% else %}
       hx-post="/api/research/start" hx-swap="none"
-      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 1000)">
+      hx-on::after-request="setTimeout(function(){ window.location.reload(); }, 1000)"
+      {% endif %}>
     <!-- Query row -->
     <div class="research-form">
         <input type="text" name="query"
                placeholder="Enter your research query..." required>
+        {% if refinement_enabled %}
+        <button class="btn btn-primary" type="submit">Refine Query</button>
+        {% else %}
         <button class="btn btn-primary" type="submit">Start Research</button>
+        {% endif %}
     </div>
+    {% if refinement_enabled %}
+    <div class="refine-skip-row">
+        <a href="#" class="btn-ghost" id="skip-refine-link">Skip, start immediately</a>
+    </div>
+    {% endif %}
 
     <!-- Preset selector -->
     <input type="hidden" name="preset" id="preset-input" value="quick">
@@ -211,6 +224,21 @@ document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('start-form')) {
         selectPreset('quick');
     }
+    // "Skip, start immediately" link: submit query directly without refinement
+    var skipLink = document.getElementById('skip-refine-link');
+    if (skipLink) {
+        skipLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            var form = document.getElementById('start-form');
+            var query = form.querySelector('input[name="query"]').value.trim();
+            if (!query) { form.querySelector('input[name="query"]').focus(); return; }
+            // POST to /api/research/start via fetch, then reload
+            var formData = new FormData(form);
+            fetch('/api/research/start', { method: 'POST', body: formData })
+                .then(function() { setTimeout(function(){ window.location.reload(); }, 1000); })
+                .catch(function(err) { alert('Failed to start: ' + err); });
+        });
+    }
 });
 </script>
 
@@ -218,6 +246,9 @@ document.addEventListener('DOMContentLoaded', function() {
 {% if session %}
 <div class="session-info">
     <strong>Query:</strong> {{ session.query[:200] }}{% if session.query|length > 200 %}...{% endif %}<br>
+    {% if session.refined_brief %}
+    <strong>Refined Brief:</strong> {{ session.refined_brief[:300] }}{% if session.refined_brief|length > 300 %}...{% endif %}<br>
+    {% endif %}
     <strong>Started:</strong> {{ session.started_at }}<br>
     <strong>Status:</strong> {{ session.status }}
 </div>

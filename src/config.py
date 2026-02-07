@@ -126,6 +126,8 @@ class ResearchSession(BaseModel):
     conclusion: Optional[str] = None
     report_markdown_path: Optional[str] = None
     report_html_path: Optional[str] = None
+    refined_brief: Optional[str] = None
+    refinement_qa: Optional[str] = None
 
 
 # =============================================================================
@@ -140,6 +142,7 @@ class LLMModelsConfig(BaseModel):
     outline_designer: str = "gpt-4o"
     synthesizer: str = "gpt-4o"
     analyzer: str = "gpt-4o-mini"
+    refiner: str = "gpt-4o-mini"
 
 
 class LLMMaxTokensConfig(BaseModel):
@@ -150,6 +153,7 @@ class LLMMaxTokensConfig(BaseModel):
     outline_designer: int = 100_000
     synthesizer: int = 100_000
     analyzer: int = 4000
+    refiner: int = 4000
 
 
 class LLMTemperatureConfig(BaseModel):
@@ -160,6 +164,7 @@ class LLMTemperatureConfig(BaseModel):
     outline_designer: float = 0.3
     synthesizer: float = 0.3
     analyzer: float = 0.2
+    refiner: float = 0.4
 
 
 class LLMConfig(BaseModel):
@@ -250,6 +255,12 @@ class DatabaseConfig(BaseModel):
     wal_mode: bool = True
 
 
+class QueryRefinementConfig(BaseModel):
+    enabled: bool = True
+    min_questions: int = 3
+    max_questions: int = 5
+
+
 class Config(BaseModel):
     """Main configuration model"""
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -263,6 +274,7 @@ class Config(BaseModel):
     rate_limits: RateLimitsConfig = Field(default_factory=RateLimitsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    query_refinement: QueryRefinementConfig = Field(default_factory=QueryRefinementConfig)
 
 
 # =============================================================================
