@@ -15,21 +15,22 @@
     <input type="hidden" name="token" value="{{ token }}">
 
     {% for q in questions %}
+    {% set qi = loop.index0 %}
     <div class="refine-question">
         <h3>{{ loop.index }}. {{ q.question }}</h3>
         <div class="refine-options">
             {% for opt in q.options %}
             <label class="refine-option">
-                <input type="radio" name="answer_{{ loop.parent.loop.index0 }}" value="{{ opt }}">
+                <input type="radio" name="answer_{{ qi }}" value="{{ opt }}">
                 <span>{{ opt }}</span>
             </label>
             {% endfor %}
             <div class="refine-custom-input">
                 <label class="refine-option">
-                    <input type="radio" name="answer_{{ loop.index0 }}" value="">
+                    <input type="radio" name="answer_{{ qi }}" value="">
                     <span>Other:</span>
                 </label>
-                <input type="text" name="custom_{{ loop.index0 }}"
+                <input type="text" name="custom_{{ qi }}"
                        class="refine-custom-text"
                        placeholder="Type your own answer..."
                        onfocus="this.previousElementSibling.querySelector('input[type=radio]').checked=true">
