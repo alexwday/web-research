@@ -1,44 +1,66 @@
-<div class="stats-grid">
-    <div class="stat-card">
-        <div class="value">{{ stats.get("total_tasks", 0) }}</div>
-        <div class="label">Total Tasks</div>
+{% set total = stats.get("total_tasks", 0) %}
+{% set done = stats.get("completed_tasks", 0) %}
+{% set pending = stats.get("pending_tasks", 0) %}
+{% set failed = stats.get("failed_tasks", 0) %}
+{% set pct = ((done / total * 100) | round | int) if total > 0 else 0 %}
+{% set circ = 113 %}
+{% set offset = circ - (circ * pct / 100) %}
+
+<div class="stats-panels">
+
+    {# ── Pipeline panel ─────────────────────────────────── #}
+    <div class="sp-panel sp-blue">
+        <div class="sp-header">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Pipeline</span>
+        </div>
+        <div class="sp-body sp-pipeline-body">
+            <div class="sp-ring-wrap">
+                <svg class="sp-ring" viewBox="0 0 44 44">
+                    <circle cx="22" cy="22" r="18" fill="none" stroke="#e2e8f0" stroke-width="4"/>
+                    <circle cx="22" cy="22" r="18" fill="none" stroke="var(--blue)" stroke-width="4"
+                            stroke-dasharray="{{ circ }}" stroke-dashoffset="{{ offset }}"
+                            stroke-linecap="round" transform="rotate(-90 22 22)"/>
+                </svg>
+                <span class="sp-ring-pct">{{ pct }}%</span>
+            </div>
+            <div class="sp-breakdown">
+                <div class="sp-stat"><span class="sp-stat-val">{{ total }}</span> Total</div>
+                <div class="sp-stat"><span class="sp-stat-val">{{ done }}</span> Done</div>
+                <div class="sp-stat"><span class="sp-stat-val">{{ pending }}</span> Pending</div>
+                {% if failed > 0 %}
+                <div class="sp-stat sp-stat-fail"><span class="sp-stat-val">{{ failed }}</span> Failed</div>
+                {% endif %}
+            </div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.get("completed_tasks", 0) }}</div>
-        <div class="label">Completed</div>
+
+    {# ── Content panel ──────────────────────────────────── #}
+    <div class="sp-panel sp-green">
+        <div class="sp-header">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            <span>Content</span>
+        </div>
+        <div class="sp-body">
+            <div class="sp-stat"><span class="sp-stat-val">{{ stats.get("total_sources", 0) }}</span> Sources</div>
+            <div class="sp-stat"><span class="sp-stat-val">{{ "{:,}".format(stats.get("total_words", 0)) }}</span> Words</div>
+            <div class="sp-stat"><span class="sp-stat-val">{{ stats.get("glossary_terms", 0) }}</span> Glossary</div>
+        </div>
     </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.get("pending_tasks", 0) }}</div>
-        <div class="label">Pending</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.get("failed_tasks", 0) }}</div>
-        <div class="label">Failed</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.get("total_sources", 0) }}</div>
-        <div class="label">Sources</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(stats.get("total_words", 0)) }}</div>
-        <div class="label">Words</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ stats.get("glossary_terms", 0) }}</div>
-        <div class="label">Glossary Terms</div>
-    </div>
+
+    {# ── LLM Cost panel (conditional) ───────────────────── #}
     {% if token_stats is defined and token_stats %}
-    <div class="stat-card">
-        <div class="value">{{ "{:,}".format(token_stats.total_tokens) }}</div>
-        <div class="label">Tokens Used</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{{ token_stats.calls }}</div>
-        <div class="label">LLM Calls</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">${{ "%.4f"|format(token_stats.total_cost) }}</div>
-        <div class="label">Est. Cost</div>
+    <div class="sp-panel sp-gold">
+        <div class="sp-header">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            <span>LLM Cost</span>
+        </div>
+        <div class="sp-body">
+            <div class="sp-stat sp-stat-featured"><span class="sp-stat-val">${{ "%.4f"|format(token_stats.total_cost) }}</span> Cost</div>
+            <div class="sp-stat"><span class="sp-stat-val">{{ "{:,}".format(token_stats.total_tokens) }}</span> Tokens</div>
+            <div class="sp-stat"><span class="sp-stat-val">{{ token_stats.calls }}</span> Calls</div>
+        </div>
     </div>
     {% endif %}
+
 </div>
