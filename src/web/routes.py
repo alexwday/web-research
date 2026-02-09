@@ -10,6 +10,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from collections import OrderedDict
 from urllib.parse import urlparse
@@ -78,7 +79,7 @@ def _resolve_session(session_param: Optional[int] = None) -> Optional[ResearchSe
 
 def _empty_activity_log_context() -> dict:
     return {
-        "phase_groups": [],
+        "task_groups": [],
         "total_queries": 0,
         "total_results": 0,
         "unique_domains": 0,
@@ -86,7 +87,11 @@ def _empty_activity_log_context() -> dict:
 
 
 def _build_activity_log_context(session_id: Optional[int]) -> dict:
-    """Build nested activity data: phase -> query -> result."""
+    """Build nested activity data grouped by task, with status resolution.
+
+    Returns task_groups (ordered list) each containing queries with nested results.
+    Each result has status flags: is_processed, is_skipped, is_planning_complete.
+    """
     if not session_id:
         return _empty_activity_log_context()
 
@@ -95,85 +100,84 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
     if not events:
         return _empty_activity_log_context()
 
-    task_topics = {t.id: t.topic for t in db.get_all_tasks(session_id=session_id)}
-    phase_map = OrderedDict(
-        [
-            (
-                "planning",
-                {
-                    "phase_key": "planning",
-                    "phase_label": "Pre-Planning Phase",
-                    "queries": [],
-                    "query_count": 0,
-                    "result_count": 0,
-                },
-            ),
-            (
-                "research",
-                {
-                    "phase_key": "research",
-                    "phase_label": "Research Phase",
-                    "queries": [],
-                    "query_count": 0,
-                    "result_count": 0,
-                },
-            ),
-            (
-                "compilation",
-                {
-                    "phase_key": "compilation",
-                    "phase_label": "Synthesis & Compilation Phase",
-                    "queries": [],
-                    "query_count": 0,
-                    "result_count": 0,
-                },
-            ),
-        ]
-    )
+    all_tasks = db.get_all_tasks(session_id=session_id)
+    task_topics = {t.id: t.topic for t in all_tasks}
+    task_statuses = {t.id: (t.status.value if hasattr(t.status, 'value') else t.status)
+                     for t in all_tasks}
+    has_tasks = len(task_statuses) > 0
 
+    # Resolve which URLs were saved as sources per-task
+    processed_by_task = db.get_processed_urls_by_task(session_id)
+    processed_any = set()
+    for urls in processed_by_task.values():
+        processed_any.update(urls)
+
+    # Ordered dict of task groups keyed by task_id (None = planning, "compilation" = synthesis)
+    task_group_map = OrderedDict()
     query_map = {}
     total_queries = 0
     total_results = 0
     domains = set()
 
+    def _get_task_group(task_id, phase):
+        """Get or create a task group."""
+        key = task_id if task_id is not None else f"__{phase}"
+        if key not in task_group_map:
+            if phase == "compilation":
+                label = "Synthesis & Compilation"
+                icon = "compilation"
+            elif task_id is None:
+                label = "Planning"
+                icon = "planning"
+            else:
+                label = task_topics.get(task_id, f"Task {task_id}")
+                icon = "research"
+            task_group_map[key] = {
+                "task_id": task_id,
+                "task_topic": label,
+                "phase": phase,
+                "icon": icon,
+                "queries": [],
+                "query_count": 0,
+                "result_count": 0,
+            }
+        return task_group_map[key]
+
     for ev in events:
-        # Agent actions (rewrite, summary, conclusion) go to compilation phase
         if ev.event_type == "agent_action":
-            phase_group = phase_map["compilation"]
-            phase_group["query_count"] += 1
+            group = _get_task_group(ev.task_id, "compilation")
+            group["query_count"] += 1
             total_queries += 1
-            phase_group["queries"].append({
+            group["queries"].append({
                 "query_group": ev.query_group,
                 "query_text": (ev.query_text or "").strip(),
+                "is_action": True,
                 "results": [],
-                "task_id": ev.task_id,
-                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
             })
             continue
 
-        phase_key = "planning" if ev.task_id is None else "research"
-        phase_group = phase_map[phase_key]
-        query_key = f"{phase_key}:{ev.task_id or 0}:{ev.query_group}"
+        phase = "planning" if ev.task_id is None else "research"
+        group = _get_task_group(ev.task_id, phase)
+        query_key = f"{phase}:{ev.task_id or 0}:{ev.query_group}"
 
         if ev.event_type == "query":
             total_queries += 1
-            phase_group["query_count"] += 1
+            group["query_count"] += 1
             q_entry = {
                 "query_group": ev.query_group,
                 "query_text": (ev.query_text or "").strip() or "(query unavailable)",
+                "is_action": False,
                 "results": [],
-                "task_id": ev.task_id,
-                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
             }
             query_map[query_key] = q_entry
-            phase_group["queries"].append(q_entry)
+            group["queries"].append(q_entry)
             continue
 
         if ev.event_type != "result":
             continue
 
         total_results += 1
-        phase_group["result_count"] += 1
+        group["result_count"] += 1
         if ev.url:
             try:
                 netloc = urlparse(ev.url).netloc
@@ -187,27 +191,42 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
             q_entry = {
                 "query_group": ev.query_group,
                 "query_text": "(query unavailable)",
+                "is_action": False,
                 "results": [],
-                "task_id": ev.task_id,
-                "task_topic": task_topics.get(ev.task_id, "") if ev.task_id else "",
             }
             query_map[query_key] = q_entry
-            phase_group["queries"].append(q_entry)
+            group["queries"].append(q_entry)
 
-        q_entry["results"].append(
-            {
-                "url": ev.url or "",
-                "title": ev.title or "Untitled",
-                "snippet": ev.snippet or "",
-                "quality_score": ev.quality_score,
-            }
-        )
+        # Build result entry with status flags
+        result = {
+            "url": ev.url or "",
+            "title": ev.title or "Untitled",
+            "snippet": ev.snippet or "",
+            "quality_score": ev.quality_score,
+            "is_processed": False,
+            "is_skipped": False,
+            "is_planning_complete": False,
+        }
 
-    phase_groups = [
-        g for g in phase_map.values() if g["queries"] or g["query_count"] or g["result_count"]
-    ]
+        url = ev.url or ""
+        task_id = ev.task_id
+        if task_id is not None:
+            if url and url in processed_by_task.get(task_id, set()):
+                result["is_processed"] = True
+            elif task_statuses.get(task_id) in ("completed", "failed"):
+                result["is_processed"] = True
+                result["is_skipped"] = True
+        elif url and url in processed_any:
+            result["is_processed"] = True
+        elif has_tasks:
+            result["is_processed"] = True
+            result["is_planning_complete"] = True
+
+        q_entry["results"].append(result)
+
+    task_groups = list(task_group_map.values())
     return {
-        "phase_groups": phase_groups,
+        "task_groups": task_groups,
         "total_queries": total_queries,
         "total_results": total_results,
         "unique_domains": len(domains),
@@ -281,12 +300,19 @@ def _build_flat_activity_context(session_id: Optional[int]) -> dict:
             })
 
     # Resolve processing status for result entries.
-    # A result is treated as processed once we have persisted any source payload
-    # (extracted notes OR raw content fallback) for that task+URL.
+    # A result is "processed" when either:
+    #   1. Its URL was saved as a source (in processed_by_task), OR
+    #   2. Its task has moved past in_progress (search phase done; URL was skipped/filtered), OR
+    #   3. It's a planning-phase result (task_id=None) and tasks have been created.
     processed_by_task = db.get_processed_urls_by_task(session_id)
     processed_any = set()
     for urls in processed_by_task.values():
         processed_any.update(urls)
+
+    # Build set of task statuses to detect finished tasks
+    task_statuses = {t.id: (t.status.value if hasattr(t.status, 'value') else t.status)
+                     for t in db.get_all_tasks(session_id=session_id)}
+    has_tasks = len(task_statuses) > 0
 
     for entry in entries:
         if entry["type"] != "result":
@@ -298,8 +324,16 @@ def _build_flat_activity_context(session_id: Optional[int]) -> dict:
         if task_id is not None:
             if url in processed_by_task.get(task_id, set()):
                 entry["is_processed"] = True
+            elif task_statuses.get(task_id) in ("completed", "failed"):
+                # Task finished — URL was seen but not saved as source (filtered out)
+                entry["is_processed"] = True
+                entry["is_skipped"] = True
         elif url in processed_any:
             entry["is_processed"] = True
+        elif has_tasks:
+            # Planning-phase result: tasks have been created, planning is done
+            entry["is_processed"] = True
+            entry["is_planning_complete"] = True
 
     # Reverse for newest-first
     entries.reverse()
@@ -362,8 +396,9 @@ async def dashboard(request: Request, session: Optional[int] = None):
     current_tasks = db.get_in_progress_tasks(session_id=sid) if sid else []
     elapsed_seconds = 0
     if resolved and resolved.started_at:
-        elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
-    activity_log = _build_flat_activity_context(sid)
+        end = resolved.ended_at if resolved.ended_at else datetime.now()
+        elapsed_seconds = max(0, int((end - resolved.started_at).total_seconds()))
+    activity_log = _build_activity_log_context(sid)
 
     refinement_enabled = get_config().query_refinement.enabled
 
@@ -386,51 +421,37 @@ async def dashboard(request: Request, session: Optional[int] = None):
 
 
 @router.get("/tasks", response_class=HTMLResponse)
-async def tasks_page(request: Request, status: Optional[str] = None, session: Optional[int] = None):
-    db = _db()
-    resolved = _resolve_session(session)
-    sid = resolved.id if resolved else None
-
-    if status and status != "all":
-        try:
-            task_status = TaskStatus(status)
-        except ValueError:
-            task_status = None
-        task_list = db.get_all_tasks(task_status, session_id=sid) if task_status else db.get_all_tasks(session_id=sid)
-    else:
-        task_list = db.get_all_tasks(session_id=sid)
-
-    task_queries = db.get_search_queries_by_task(sid) if sid else {}
-
-    return templates.TemplateResponse("tasks.html", {
-        "request": request,
-        "tasks": task_list,
-        "task_queries": task_queries,
-        "current_filter": status or "all",
-        "session": resolved,
-        "session_id": sid,
-        "page": "tasks",
-    })
+async def tasks_page(request: Request, session: Optional[int] = None):
+    sq = f"?session={session}" if session else ""
+    return RedirectResponse(url=f"/research{sq}", status_code=302)
 
 
 @router.get("/sources", response_class=HTMLResponse)
 async def sources_page(request: Request, session: Optional[int] = None):
-    db = _db()
-    resolved = _resolve_session(session)
-    sid = resolved.id if resolved else None
+    sq = f"?session={session}" if session else ""
+    return RedirectResponse(url=f"/research{sq}", status_code=302)
 
+
+def _build_source_groups(db, sid, task_id=None, include_rejected=False):
+    """Build grouped source list for research/sources pages.
+
+    If task_id is given, return only sources for that task.
+    If include_rejected is True, append quality-rejected search results.
+    """
     if sid is not None:
         source_list = db.get_sources_for_session(sid)
     else:
         source_list = db.get_all_sources()
 
-    # Build task lookup for grouping
     task_topics = {}
     if sid:
         for t in db.get_all_tasks(session_id=sid):
             task_topics[t.id] = t.topic
 
-    # Group sources by task (use first task_id), sort groups by task id
+    # Optionally filter to a single task
+    if task_id is not None:
+        source_list = [s for s in source_list if task_id in (s.task_ids or [])]
+
     task_groups = OrderedDict()
     ungrouped = []
     for s in source_list:
@@ -440,36 +461,84 @@ async def sources_page(request: Request, session: Optional[int] = None):
         else:
             ungrouped.append(s)
 
-    # Sort each group by quality_score descending
+    # Add rejected search results (from search events not saved as sources)
+    if include_rejected and sid:
+        rejected = db.get_rejected_search_results(sid)
+        for r in rejected:
+            if task_id is not None and r["task_id"] != task_id:
+                continue
+            # Use SimpleNamespace for template attribute access compatibility
+            domain = ""
+            try:
+                domain = urlparse(r["url"]).netloc
+            except Exception:
+                pass
+            rejected_source = SimpleNamespace(
+                url=r["url"],
+                title=r["title"],
+                domain=domain,
+                snippet=r["snippet"] or "",
+                quality_score=r["quality_score"] or 0.0,
+                is_academic=False,
+                is_rejected=True,
+                extracted_content=None,
+                full_content=None,
+            )
+            tid = r["task_id"]
+            if tid is not None:
+                task_groups.setdefault(tid, []).append(rejected_source)
+            else:
+                ungrouped.append(rejected_source)
+
     ordered_groups = []
-    for task_id in sorted(task_groups.keys()):
-        sources = task_groups[task_id]
-        sources.sort(key=lambda s: s.quality_score, reverse=True)
+    for tid in sorted(task_groups.keys()):
+        sources = task_groups[tid]
+        # Sort: accepted first (by quality desc), then rejected (by quality desc)
+        sources.sort(key=lambda s: (not getattr(s, 'is_rejected', False), s.quality_score), reverse=True)
         ordered_groups.append({
-            "task_id": task_id,
-            "task_topic": task_topics.get(task_id, f"Task {task_id}"),
+            "task_id": tid,
+            "task_topic": task_topics.get(tid, f"Task {tid}"),
             "sources": sources,
         })
     if ungrouped:
-        ungrouped.sort(key=lambda s: s.quality_score, reverse=True)
+        ungrouped.sort(key=lambda s: (not getattr(s, 'is_rejected', False), s.quality_score), reverse=True)
         ordered_groups.append({
             "task_id": None,
             "task_topic": "Ungrouped",
             "sources": ungrouped,
         })
 
-    # Flat list for backwards compat (total count)
-    all_sources = []
-    for g in ordered_groups:
-        all_sources.extend(g["sources"])
+    total = sum(len(g["sources"]) for g in ordered_groups)
+    return ordered_groups, total
 
-    return templates.TemplateResponse("sources.html", {
+
+@router.get("/research", response_class=HTMLResponse)
+async def research_page(request: Request, session: Optional[int] = None):
+    db = _db()
+    resolved = _resolve_session(session)
+    sid = resolved.id if resolved else None
+
+    task_list = db.get_all_tasks(session_id=sid)
+
+    # Build source count per task (accepted only for the count)
+    source_groups_accepted, _ = _build_source_groups(db, sid)
+    task_source_counts = {}
+    for g in source_groups_accepted:
+        if g["task_id"] is not None:
+            task_source_counts[g["task_id"]] = len(g["sources"])
+
+    # Build full source groups including rejected for display
+    source_groups, total_sources = _build_source_groups(db, sid, include_rejected=True)
+
+    return templates.TemplateResponse("research.html", {
         "request": request,
-        "sources": all_sources,
-        "source_groups": ordered_groups,
+        "tasks": task_list,
+        "task_source_counts": task_source_counts,
+        "source_groups": source_groups,
+        "total_sources": total_sources,
         "session": resolved,
         "session_id": sid,
-        "page": "sources",
+        "page": "research",
     })
 
 
@@ -969,6 +1038,30 @@ async def api_research_start_refined(request: Request):
 # HTMX fragment endpoints (polled every 5 s)
 # =========================================================================
 
+@router.get("/fragments/session-info", response_class=HTMLResponse)
+async def fragment_session_info(request: Request, session: Optional[int] = None):
+    db = _db()
+    resolved = _resolve_session(session)
+    sid = resolved.id if resolved else None
+    stats = db.get_statistics(session_id=sid)
+    running = _is_running()
+    phase = _app().get_current_phase()
+    elapsed_seconds = 0
+    if resolved and resolved.started_at:
+        end = resolved.ended_at if resolved.ended_at else datetime.now()
+        elapsed_seconds = max(0, int((end - resolved.started_at).total_seconds()))
+    return templates.TemplateResponse("fragments/session_info.html", {
+        "request": request,
+        "session": resolved,
+        "session_id": sid,
+        "stats": stats,
+        "token_stats": get_token_tracker().get_stats(),
+        "running": running,
+        "phase": phase,
+        "elapsed_seconds": elapsed_seconds,
+    })
+
+
 @router.get("/fragments/status-badge", response_class=HTMLResponse)
 async def fragment_status_badge(request: Request):
     return templates.TemplateResponse("fragments/status_badge.html", {
@@ -987,7 +1080,8 @@ async def fragment_stats(request: Request, session: Optional[int] = None):
     phase = _app().get_current_phase()
     elapsed_seconds = 0
     if resolved and resolved.started_at:
-        elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
+        end = resolved.ended_at if resolved.ended_at else datetime.now()
+        elapsed_seconds = max(0, int((end - resolved.started_at).total_seconds()))
     return templates.TemplateResponse("fragments/stats.html", {
         "request": request,
         "stats": stats,
@@ -1019,6 +1113,40 @@ async def fragment_task_list(request: Request, status: Optional[str] = None, ses
         "request": request,
         "tasks": task_list,
         "task_queries": task_queries,
+    })
+
+
+@router.get("/fragments/research-tasks", response_class=HTMLResponse)
+async def fragment_research_tasks(request: Request, session: Optional[int] = None):
+    db = _db()
+    resolved = _resolve_session(session)
+    sid = resolved.id if resolved else None
+    task_list = db.get_all_tasks(session_id=sid)
+
+    # Source count per task
+    source_groups, _ = _build_source_groups(db, sid)
+    task_source_counts = {}
+    for g in source_groups:
+        if g["task_id"] is not None:
+            task_source_counts[g["task_id"]] = len(g["sources"])
+
+    return templates.TemplateResponse("fragments/research_tasks.html", {
+        "request": request,
+        "tasks": task_list,
+        "task_source_counts": task_source_counts,
+    })
+
+
+@router.get("/fragments/research-sources", response_class=HTMLResponse)
+async def fragment_research_sources(request: Request, session: Optional[int] = None, task: Optional[int] = None):
+    db = _db()
+    resolved = _resolve_session(session)
+    sid = resolved.id if resolved else None
+    source_groups, _ = _build_source_groups(db, sid, task_id=task, include_rejected=True)
+
+    return templates.TemplateResponse("fragments/research_sources.html", {
+        "request": request,
+        "source_groups": source_groups,
     })
 
 
@@ -1065,7 +1193,8 @@ async def fragment_progress(request: Request, session: Optional[int] = None):
     # Elapsed time (seconds since session started)
     elapsed_seconds = 0
     if resolved and resolved.started_at:
-        elapsed_seconds = int((datetime.now() - resolved.started_at).total_seconds())
+        end = resolved.ended_at if resolved.ended_at else datetime.now()
+        elapsed_seconds = max(0, int((end - resolved.started_at).total_seconds()))
 
     return templates.TemplateResponse("fragments/progress.html", {
         "request": request,
@@ -1095,7 +1224,7 @@ async def fragment_activity(request: Request, session: Optional[int] = None):
 async def fragment_search_activity(request: Request, session: Optional[int] = None):
     resolved = _resolve_session(session)
     sid = resolved.id if resolved else None
-    activity_log = _build_flat_activity_context(sid)
+    activity_log = _build_activity_log_context(sid)
     return templates.TemplateResponse("fragments/search_activity.html", {
         "request": request,
         **activity_log,

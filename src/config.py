@@ -176,13 +176,13 @@ class LLMConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     depth: str = "advanced"
-    max_results: int = 8
+    results_per_query: int = 3
     queries_per_task: int = 3
     pre_plan_queries: int = 5
     pre_plan_max_results: int = 8
     gap_fill_queries: int = 2
     gap_fill_max_results: int = 3
-    min_tavily_score: float = 0.3
+    min_tavily_score: float = 0.1
     include_domains: List[str] = Field(default_factory=list)
     exclude_domains: List[str] = Field(default_factory=lambda: [
         "pinterest.com", "quora.com",
@@ -451,9 +451,9 @@ RESEARCH_PRESETS = {
             "research.max_runtime_hours": 1,
             "research.max_loops": 10,
             "research.max_concurrent_tasks": 2,
-            # Minimal searching
-            "search.queries_per_task": 1,
-            "search.max_results": 3,
+            # Focused searching — 3 queries × 2 results each = ~6 sources
+            "search.queries_per_task": 3,
+            "search.results_per_query": 2,
             "search.pre_plan_queries": 2,
             "search.pre_plan_max_results": 5,
             "search.gap_fill_queries": 0,
@@ -480,9 +480,9 @@ RESEARCH_PRESETS = {
             "research.max_runtime_hours": 2,
             "research.max_loops": 25,
             "research.max_concurrent_tasks": 3,
-            # Moderate searching
-            "search.queries_per_task": 2,
-            "search.max_results": 5,
+            # Moderate searching — 4 queries × 2 results each = ~8 sources
+            "search.queries_per_task": 4,
+            "search.results_per_query": 2,
             "search.pre_plan_queries": 4,
             "search.pre_plan_max_results": 8,
             "search.gap_fill_queries": 1,
@@ -511,9 +511,9 @@ RESEARCH_PRESETS = {
             "research.max_runtime_hours": 6,
             "research.max_loops": 50,
             "research.max_concurrent_tasks": 3,
-            # Thorough searching
-            "search.queries_per_task": 3,
-            "search.max_results": 8,
+            # Thorough searching — 5 queries × 2 results each = ~10 sources
+            "search.queries_per_task": 5,
+            "search.results_per_query": 2,
             "search.pre_plan_queries": 6,
             "search.pre_plan_max_results": 10,
             "search.gap_fill_queries": 2,
@@ -542,9 +542,9 @@ RESEARCH_PRESETS = {
             "research.max_runtime_hours": 24,
             "research.max_loops": 100,
             "research.max_concurrent_tasks": 4,
-            # Aggressive searching
-            "search.queries_per_task": 4,
-            "search.max_results": 10,
+            # Aggressive searching — 6 queries × 2 results each = ~12 sources
+            "search.queries_per_task": 6,
+            "search.results_per_query": 2,
             "search.pre_plan_queries": 8,
             "search.pre_plan_max_results": 10,
             "search.gap_fill_queries": 3,

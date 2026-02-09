@@ -196,7 +196,7 @@ def search_tavily(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
 def web_search(query: str, max_results: int = None) -> List[Dict[str, Any]]:
     """Search using Tavily API"""
     config = get_config()
-    max_results = max_results or config.search.max_results
+    max_results = max_results or config.search.results_per_query
     return search_tavily(query, max_results)
 
 

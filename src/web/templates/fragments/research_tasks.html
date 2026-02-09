@@ -1,0 +1,23 @@
+{% for task in tasks %}
+{% set status_val = task.status.value if task.status is not string else task.status %}
+{% set src_count = task_source_counts.get(task.id, 0) if task_source_counts is defined else 0 %}
+<div class="research-task-card {% if selected_task == task.id %}selected{% endif %}"
+     data-task-id="{{ task.id }}"
+     data-status="{{ status_val }}"
+     onclick="selectTask({{ task.id }})">
+    <div class="research-task-topic">{{ task.topic[:80] }}{% if task.topic|length > 80 %}...{% endif %}</div>
+    <div class="research-task-meta">
+        <span class="badge badge-{{ status_val }}">{{ status_val | replace("_", " ") }}</span>
+        <span class="research-task-pill">{{ src_count }} source{{ "s" if src_count != 1 else "" }}</span>
+        {% if task.word_count %}
+        <span class="research-task-pill">{{ "{:,}".format(task.word_count) }} words</span>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+
+{% if not tasks %}
+<div class="empty-state" style="padding:1.5rem 0.5rem">
+    <p>No tasks yet.</p>
+</div>
+{% endif %}

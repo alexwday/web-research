@@ -1,41 +1,68 @@
-{% if feed_entries|length > 0 %}
+{% if task_groups|length > 0 %}
 <div class="feed-totals">
     {{ total_queries }} searches | {{ total_results }} results | {{ unique_domains }} domains
 </div>
 <div class="feed-list">
-    {% for entry in feed_entries %}
-    <div class="feed-entry feed-entry-{{ entry.type }}">
-        {% if entry.type == "search" %}
-        <span class="feed-icon feed-icon-search" title="Search">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        </span>
-        <span class="feed-text">Searched: <strong>{{ entry.text }}</strong></span>
-        {% if entry.task_id is not none %}
-        <span class="feed-pill">Task {{ entry.task_id }}</span>
-        {% endif %}
-
-        {% elif entry.type == "result" %}
-        <span class="feed-icon">
-            {% if entry.is_processed %}
-            <svg class="feed-status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            {% else %}
-            <span class="feed-spinner"></span>
-            {% endif %}
-        </span>
-        <span class="feed-text">Found: {% if entry.url %}<a href="{{ entry.url }}" target="_blank" rel="noopener">{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}</a>{% else %}{{ entry.text[:70] }}{% if entry.text|length > 70 %}...{% endif %}{% endif %}</span>
-        {% if entry.quality_score is not none %}
-        <span class="feed-pill feed-pill-score">{{ "%.2f"|format(entry.quality_score) }}</span>
-        {% endif %}
-
-        {% elif entry.type == "action" %}
-        <span class="feed-icon feed-icon-action" title="Action">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </span>
-        <span class="feed-text">{{ entry.text }}</span>
-        {% if entry.task_topic %}
-        <span class="feed-pill">{{ entry.task_topic[:30] }}{% if entry.task_topic|length > 30 %}...{% endif %}</span>
-        {% endif %}
-        {% endif %}
+    {% for tg in task_groups %}
+    <div class="feed-task-group feed-task-group-{{ tg.icon }}">
+        <div class="feed-task-header" onclick="this.parentElement.classList.toggle('collapsed')">
+            <span class="feed-task-toggle">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+            </span>
+            <span class="feed-task-icon">
+                {% if tg.icon == "planning" %}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                {% elif tg.icon == "compilation" %}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                {% else %}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                {% endif %}
+            </span>
+            <span class="feed-task-label">{{ tg.task_topic[:50] }}{% if tg.task_topic|length > 50 %}...{% endif %}</span>
+            <span class="feed-task-counts">{{ tg.query_count }}q / {{ tg.result_count }}r</span>
+        </div>
+        <div class="feed-task-body">
+            {% for q in tg.queries %}
+            <div class="feed-query-group">
+                <div class="feed-query-row">
+                    {% if q.is_action %}
+                    <span class="feed-icon feed-icon-action" title="Action">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    </span>
+                    <span class="feed-query-text">{{ q.query_text }}</span>
+                    {% else %}
+                    <span class="feed-icon feed-icon-search" title="Search">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    </span>
+                    <span class="feed-query-text">{{ q.query_text }}</span>
+                    {% endif %}
+                </div>
+                {% if q.results %}
+                <div class="feed-results-list">
+                    {% for r in q.results %}
+                    <div class="feed-result-row">
+                        <span class="feed-result-status">
+                            {% if r.is_planning_complete %}
+                            <svg class="feed-status-planned" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            {% elif r.is_skipped %}
+                            <svg class="feed-status-skipped" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            {% elif r.is_processed %}
+                            <svg class="feed-status-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            {% else %}
+                            <span class="feed-spinner-sm"></span>
+                            {% endif %}
+                        </span>
+                        <span class="feed-result-text">{% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title[:60] }}{% if r.title|length > 60 %}...{% endif %}</a>{% else %}{{ r.title[:60] }}{% if r.title|length > 60 %}...{% endif %}{% endif %}</span>
+                        {% if r.quality_score is not none %}
+                        <span class="feed-pill feed-pill-score">{{ "%.2f"|format(r.quality_score) }}</span>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
     </div>
     {% endfor %}
 </div>

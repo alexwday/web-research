@@ -145,8 +145,8 @@
                                 <input type="number" id="f-queries-per-task" name="search.queries_per_task" min="1" max="10">
                             </div>
                             <div class="field">
-                                <label for="f-max-results">Max Results</label>
-                                <input type="number" id="f-max-results" name="search.max_results" min="1" max="20">
+                                <label for="f-results-per-query">Results per Query</label>
+                                <input type="number" id="f-results-per-query" name="search.results_per_query" min="1" max="10">
                             </div>
                         </div>
 
@@ -215,61 +215,16 @@
         </form>
         {% endif %}
 
-        <!-- Session info -->
+        <!-- Session info + metrics (polled) -->
         {% if session %}
-        {% set session_status = session.status if session.status else "unknown" %}
-        <div class="session-info">
-            <div class="session-info-grid">
-                <div class="session-info-item session-info-item-wide">
-                    <div class="session-info-label">Query</div>
-                    <p class="session-info-value session-info-value-text">
-                        {{ session.query[:200] }}{% if session.query|length > 200 %}...{% endif %}
-                    </p>
-                </div>
-
-                {% if session.refined_brief %}
-                <div class="session-info-item session-info-item-wide">
-                    <div class="session-info-label">Refined Brief</div>
-                    <p class="session-info-value session-info-value-text">
-                        {{ session.refined_brief[:300] }}{% if session.refined_brief|length > 300 %}...{% endif %}
-                    </p>
-                    {% if session.refined_brief|length > 300 %}
-                    <details class="session-brief-details">
-                        <summary class="session-brief-summary">Show full refined brief</summary>
-                        <p class="session-info-value session-info-value-text session-brief-full">
-                            {{ session.refined_brief }}
-                        </p>
-                    </details>
-                    {% endif %}
-                </div>
-                {% endif %}
-
-                <div class="session-info-item">
-                    <div class="session-info-label">Started</div>
-                    <p class="session-info-value">
-                        {{ session.started_at.strftime('%Y-%m-%d %H:%M') if session.started_at else "-" }}
-                    </p>
-                </div>
-
-                <div class="session-info-item">
-                    <div class="session-info-label">Status</div>
-                    <p class="session-info-value">
-                        <span class="session-status-pill session-status-{{ session_status }}">
-                            {{ session_status|replace("_", " ")|title }}
-                        </span>
-                    </p>
-                </div>
-            </div>
-        </div>
-        {% endif %}
-
-        <!-- Stats grid (polled) -->
-        <div id="stats-area"
-             hx-get="/fragments/stats{{ sq }}"
+        <div class="session-info"
+             id="session-info-area"
+             hx-get="/fragments/session-info{{ sq }}"
              hx-trigger="every 5s"
              hx-swap="innerHTML">
-            {% include "fragments/stats.html" %}
+            {% include "fragments/session_info.html" %}
         </div>
+        {% endif %}
     </main>
 
     <aside class="dashboard-sidebar dashboard-sidebar-right">
@@ -278,7 +233,9 @@
             <div id="activity-log-area"
                  hx-get="/fragments/search-activity{{ sq }}"
                  hx-trigger="every 3s"
-                 hx-swap="innerHTML">
+                 hx-swap="innerHTML"
+                 hx-on::before-swap="var fl = this.querySelector('.feed-list'); this._feedScroll = fl?.scrollTop; this._collapsed = []; this.querySelectorAll('.feed-task-group.collapsed').forEach(function(g,i){ this._collapsed.push(i) }.bind(this))"
+                 hx-on::after-swap="var fl = this.querySelector('.feed-list'); if (fl && this._feedScroll != null) fl.scrollTop = this._feedScroll; if (this._collapsed) { var gs = this.querySelectorAll('.feed-task-group'); this._collapsed.forEach(function(i){ if(gs[i]) gs[i].classList.add('collapsed') }) }">
                 {% include "fragments/search_activity.html" %}
             </div>
         </div>
@@ -289,55 +246,55 @@
 var PRESETS = {
     quick: {
         "research.min_initial_tasks": 3,
-        "research.max_total_tasks": 5,
-        "research.min_words_per_section": 100,
-        "research.max_words_per_section": 500,
-        "research.min_citations_per_section": 1,
+        "research.max_total_tasks": 10,
         "research.enable_recursion": false,
         "research.max_recursion_depth": 0,
         "research.max_runtime_hours": 1,
-        "research.max_loops": 5,
-        "search.queries_per_task": 1,
-        "search.max_results": 3
+        "research.max_loops": 10,
+        "research.min_words_per_section": 200,
+        "research.max_words_per_section": 600,
+        "research.min_citations_per_section": 1,
+        "search.queries_per_task": 3,
+        "search.results_per_query": 2
     },
     standard: {
-        "research.min_initial_tasks": 8,
-        "research.max_total_tasks": 15,
-        "research.min_words_per_section": 500,
-        "research.max_words_per_section": 2000,
-        "research.min_citations_per_section": 3,
+        "research.min_initial_tasks": 5,
+        "research.max_total_tasks": 25,
         "research.enable_recursion": true,
         "research.max_recursion_depth": 1,
-        "research.max_runtime_hours": 6,
-        "research.max_loops": 15,
-        "search.queries_per_task": 2,
-        "search.max_results": 5
+        "research.max_runtime_hours": 2,
+        "research.max_loops": 25,
+        "research.min_words_per_section": 400,
+        "research.max_words_per_section": 1500,
+        "research.min_citations_per_section": 2,
+        "search.queries_per_task": 4,
+        "search.results_per_query": 2
     },
     deep: {
-        "research.min_initial_tasks": 15,
-        "research.max_total_tasks": 30,
-        "research.min_words_per_section": 1000,
-        "research.max_words_per_section": 3000,
-        "research.min_citations_per_section": 5,
+        "research.min_initial_tasks": 8,
+        "research.max_total_tasks": 50,
         "research.enable_recursion": true,
         "research.max_recursion_depth": 2,
-        "research.max_runtime_hours": 24,
-        "research.max_loops": 30,
-        "search.queries_per_task": 3,
-        "search.max_results": 8
+        "research.max_runtime_hours": 6,
+        "research.max_loops": 50,
+        "research.min_words_per_section": 800,
+        "research.max_words_per_section": 2500,
+        "research.min_citations_per_section": 4,
+        "search.queries_per_task": 5,
+        "search.results_per_query": 2
     },
     exhaustive: {
-        "research.min_initial_tasks": 30,
-        "research.max_total_tasks": 50,
-        "research.min_words_per_section": 2000,
-        "research.max_words_per_section": 5000,
-        "research.min_citations_per_section": 8,
+        "research.min_initial_tasks": 12,
+        "research.max_total_tasks": 100,
         "research.enable_recursion": true,
         "research.max_recursion_depth": 3,
-        "research.max_runtime_hours": 48,
-        "research.max_loops": 50,
-        "search.queries_per_task": 4,
-        "search.max_results": 10
+        "research.max_runtime_hours": 24,
+        "research.max_loops": 100,
+        "research.min_words_per_section": 1500,
+        "research.max_words_per_section": 4000,
+        "research.min_citations_per_section": 6,
+        "search.queries_per_task": 6,
+        "search.results_per_query": 2
     }
 };
 
@@ -716,7 +673,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     document.addEventListener('DOMContentLoaded', startTimer);
     document.body.addEventListener('htmx:afterSwap', function(e) {
-        if (e.detail.target && e.detail.target.id === 'stats-area') {
+        if (e.detail.target && (e.detail.target.id === 'stats-area' || e.detail.target.id === 'session-info-area')) {
             startTimer();
         }
     });

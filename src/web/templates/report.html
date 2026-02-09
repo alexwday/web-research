@@ -7,9 +7,6 @@
 {% set sq = "?session=" ~ session_id|string if session_id else "" %}
 <div class="report-title-row">
     <h1 class="page-title">Report Preview</h1>
-    {% if sections %}
-    <span class="report-stats-pill">{{ sections|length }} sections &middot; {{ "{:,}".format(stats.get("total_words", 0)) }} words &middot; {{ stats.get("total_sources", 0) }} sources</span>
-    {% endif %}
 </div>
 
 {% if sections %}
@@ -65,7 +62,7 @@
     <!-- LEFT: Sticky TOC -->
     <aside class="report-sidebar report-sidebar-left">
         <nav class="report-toc-sticky">
-            <h3>Contents</h3>
+            <h3 class="report-sidebar-heading">Contents <span class="report-sidebar-count">{{ sections|length }}</span></h3>
             <ul class="report-toc-list">
                 {% if exec_summary_html %}
                 <li><a href="#exec-summary">Executive Summary</a></li>
@@ -125,7 +122,7 @@
     <aside class="report-sidebar report-sidebar-right">
         {% if sources %}
         <div class="report-bib-sticky">
-            <h3>References</h3>
+            <h3 class="report-sidebar-heading">References <span class="report-sidebar-count">{{ sources|length }}</span></h3>
             <ol class="report-bib-list">
                 {% for s in sources %}
                 <li>

@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Research – Deep Research Agent{% endblock %}
+{% block container_class %}research-container{% endblock %}
+
+{% block content %}
+{% set sp = "&session=" ~ session_id|string if session_id else "" %}
+{% set sq = "?session=" ~ session_id|string if session_id else "" %}
+
+<h1 class="page-title">Research</h1>
+
+<div class="research-two-col">
+    <!-- Left panel: task list -->
+    <div class="research-task-panel">
+        <div class="research-task-panel-header">
+            <span class="research-panel-title">Tasks</span>
+            <span class="sidebar-count">{{ tasks|length }}</span>
+        </div>
+        <div class="filter-tabs research-filter-tabs">
+            <a href="#" class="active" data-filter="all" onclick="filterTasks(event, 'all')">All</a>
+            <a href="#" data-filter="pending" onclick="filterTasks(event, 'pending')">Pending</a>
+            <a href="#" data-filter="in_progress" onclick="filterTasks(event, 'in_progress')">In Progress</a>
+            <a href="#" data-filter="completed" onclick="filterTasks(event, 'completed')">Completed</a>
+            <a href="#" data-filter="failed" onclick="filterTasks(event, 'failed')">Failed</a>
+        </div>
+        <div id="research-tasks"
+             hx-get="/fragments/research-tasks{{ sq }}"
+             hx-trigger="every 5s"
+             hx-swap="innerHTML">
+            {% include "fragments/research_tasks.html" %}
+        </div>
+    </div>
+
+    <!-- Right panel: sources -->
+    <div class="research-source-panel">
+        <div class="research-source-panel-header">
+            <span class="research-panel-title">Sources</span>
+            <span class="sidebar-count" id="research-source-count">{{ total_sources }}</span>
+            <span class="research-filter-label" id="research-filter-label" style="display:none"></span>
+            <a href="#" id="research-clear-filter" style="display:none" onclick="clearTaskFilter(event)">Show all</a>
+        </div>
+        <div id="research-sources"
+             hx-get="/fragments/research-sources{{ sq }}"
+             hx-trigger="every 5s"
+             hx-swap="innerHTML">
+            {% include "fragments/research_sources.html" %}
+        </div>
+    </div>
+</div>
+
+<script>
+var _selectedTask = null;
+var _currentStatusFilter = 'all';
+
+function selectTask(taskId) {
+    if (_selectedTask === taskId) {
+        // Deselect
+        _selectedTask = null;
+        _updateTaskSelection();
+        _loadSources();
+        return;
+    }
+    _selectedTask = taskId;
+    _updateTaskSelection();
+    _loadSources();
+}
+
+function _updateTaskSelection() {
+    document.querySelectorAll('.research-task-card').forEach(function(card) {
+        var id = parseInt(card.getAttribute('data-task-id'));
+        if (id === _selectedTask) {
+            card.classList.add('selected');
+        } else {
+            card.classList.remove('selected');
+        }
+    });
+
+    var label = document.getElementById('research-filter-label');
+    var clearBtn = document.getElementById('research-clear-filter');
+    if (_selectedTask) {
+        var selectedCard = document.querySelector('.research-task-card[data-task-id="' + _selectedTask + '"]');
+        var topic = selectedCard ? selectedCard.querySelector('.research-task-topic').textContent.trim() : 'Task ' + _selectedTask;
+        label.textContent = 'Filtered: ' + topic;
+        label.style.display = '';
+        clearBtn.style.display = '';
+    } else {
+        label.style.display = 'none';
+        clearBtn.style.display = 'none';
+    }
+}
+
+function clearTaskFilter(e) {
+    if (e) e.preventDefault();
+    _selectedTask = null;
+    _updateTaskSelection();
+    _loadSources();
+}
+
+function _loadSources() {
+    var url = '/fragments/research-sources{{ sq }}';
+    if (_selectedTask) {
+        url += (url.indexOf('?') !== -1 ? '&' : '?') + 'task=' + _selectedTask;
+    }
+    htmx.ajax('GET', url, '#research-sources');
+}
+
+function filterTasks(e, status) {
+    e.preventDefault();
+    _currentStatusFilter = status;
+    // Update active pill
+    document.querySelectorAll('.research-filter-tabs a').forEach(function(a) {
+        a.classList.toggle('active', a.getAttribute('data-filter') === status);
+    });
+    _applyStatusFilter();
+}
+
+function _applyStatusFilter() {
+    document.querySelectorAll('.research-task-card').forEach(function(card) {
+        if (_currentStatusFilter === 'all') {
+            card.style.display = '';
+        } else {
+            card.style.display = card.getAttribute('data-status') === _currentStatusFilter ? '' : 'none';
+        }
+    });
+}
+
+// Update the HTMX polling URL for sources to include task filter
+document.body.addEventListener('htmx:configRequest', function(e) {
+    if (e.detail.path && e.detail.path.indexOf('/fragments/research-sources') !== -1 && _selectedTask) {
+        e.detail.path += (e.detail.path.indexOf('?') !== -1 ? '&' : '?') + 'task=' + _selectedTask;
+    }
+});
+
+// After HTMX swap, re-apply selection and filter state
+document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target.id === 'research-tasks') {
+        _updateTaskSelection();
+        _applyStatusFilter();
+    }
+});
+</script>
+{% endblock %}

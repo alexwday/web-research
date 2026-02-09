@@ -1,0 +1,63 @@
+{% if source_groups is defined and source_groups %}
+{% for group in source_groups %}
+<div class="source-task-group">
+    <h2 class="source-group-heading">
+        {% if group.task_id is not none %}
+        <span class="source-group-badge">Task {{ group.task_id }}</span>
+        {% endif %}
+        {{ group.task_topic }}
+        <span class="source-group-count">{{ group.sources|length }} source{{ "s" if group.sources|length != 1 else "" }}</span>
+    </h2>
+    <div class="source-cards">
+        {% for s in group.sources %}
+        {% set rejected = s.is_rejected is defined and s.is_rejected %}
+        <div class="source-card{% if rejected %} source-card-rejected{% endif %}">
+            <div class="source-card-header">
+                <div class="source-card-title">
+                    <a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.title[:100] }}{% if s.title|length > 100 %}...{% endif %}</a>
+                </div>
+                <div class="source-card-meta">
+                    <span class="source-domain">{{ s.domain }}</span>
+                    {% if rejected %}
+                    <span class="badge badge-rejected">Rejected</span>
+                    {% else %}
+                    <span class="quality-bar">
+                        <span class="quality-bar-inner" style="width: {{ (s.quality_score * 100)|int }}%"></span>
+                    </span>
+                    <span class="source-score">{{ "%.1f"|format(s.quality_score) }}</span>
+                    {% if s.is_academic %}<span class="badge badge-academic">Academic</span>{% endif %}
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if s.snippet %}
+            <p class="source-snippet">{{ s.snippet[:300] }}{% if s.snippet|length > 300 %}...{% endif %}</p>
+            {% endif %}
+
+            {% if not rejected %}
+            {% if s.extracted_content %}
+            <details class="source-details">
+                <summary>Extracted Research</summary>
+                <div class="source-extracted-content">{{ s.extracted_content }}</div>
+            </details>
+            {% endif %}
+
+            {% if s.full_content %}
+            <details class="source-details">
+                <summary>Raw Content</summary>
+                <div class="source-raw-content"><pre><code>{{ s.full_content[:5000] }}{% if s.full_content|length > 5000 %}
+... [truncated]{% endif %}</code></pre></div>
+            </details>
+            {% endif %}
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No sources collected yet.</p>
+    <p>Sources appear as the research agent discovers and evaluates them.</p>
+</div>
+{% endif %}

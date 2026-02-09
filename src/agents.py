@@ -341,31 +341,53 @@ Do NOT add commentary or analysis - just extract what the page says.
 Keep output under 1000 words."""
 
 
-QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Generate maximally diverse search queries — each must target a different angle or source type."""
+QUERY_GENERATOR_SYSTEM = """You are a search query specialist. Your job is to decompose a research topic into short, focused search queries. Each query should retrieve results for ONE specific sub-aspect. Never combine multiple concepts into a single query."""
 
 
-QUERY_GENERATOR_PROMPT = """Generate {num_queries} search queries for:
+QUERY_GENERATOR_PROMPT = """Break down this research task into {num_queries} separate, focused search queries.
 
 Overall Research: {overall_query}
 Section Topic: {topic}
-Focus: {description}
+Task Focus: {description}
 
-Each query MUST target a different angle (e.g., one broad overview, one specific/technical, one recent data or news). Vary terminology across queries. 3-8 words each. Queries should be relevant to both the section topic and the broader research context.
+Rules:
+- Each query MUST be 3-8 words. No exceptions.
+- Each query should target ONE specific fact, concept, or data point.
+- DO NOT list multiple keywords/topics in one query.
+- Vary the angles: e.g., one for definitions, one for recent data, one for mechanisms.
+
+BAD query (too many concepts crammed in):
+  polymetallic nodules cobalt crusts sulfides Ni Co Cu grades CCZ ISA maps data
+
+GOOD queries (focused, short):
+  polymetallic nodule metal concentrations
+  cobalt-rich crust locations Pacific
+  ISA seabed mining exploration contracts
 
 Output ONLY the queries, one per line, no numbering or bullets."""
 
 
-QUERY_GENERATOR_JSON_PROMPT = """Generate {num_queries} search queries for:
+QUERY_GENERATOR_JSON_PROMPT = """Break down this research task into {num_queries} separate, focused search queries.
 
 Overall Research: {overall_query}
 Section Topic: {topic}
-Focus: {description}
+Task Focus: {description}
 
-Each query MUST target a different angle (e.g., broad overview, specific/technical angle, recent evidence/news angle).
-Use concise search phrasing and varied terminology. Queries should be relevant to both the section topic and the broader research context.
+Rules:
+- Each query MUST be 3-8 words. No exceptions.
+- Each query should target ONE specific fact, concept, or data point.
+- DO NOT list multiple keywords/topics in one query.
+- Vary the angles: e.g., one for definitions, one for recent data, one for mechanisms.
 
-Return ONLY a JSON object in this exact shape:
-{{"queries": ["query 1", "query 2"]}}
+BAD query (too many concepts crammed in):
+  polymetallic nodules cobalt crusts sulfides Ni Co Cu grades CCZ ISA maps data
+
+GOOD queries (focused, short):
+  polymetallic nodule metal concentrations
+  cobalt-rich crust locations Pacific
+  ISA seabed mining exploration contracts
+
+Return ONLY a JSON object: {{"queries": ["query 1", "query 2", ...]}}
 """
 
 QUERY_GENERATOR_TOOL_NAME = "emit_search_queries"
@@ -890,7 +912,7 @@ class ResearcherAgent:
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 1,
-                    "maxItems": max(num_queries, 8),
+                    "maxItems": num_queries,
                 }
             },
             "required": ["queries"],
@@ -1102,7 +1124,9 @@ class ResearcherAgent:
             session_id=session_id, task_id=task_id,
             event_type="query", query_group=qg, query_text=query,
         )
-        results = web_search(query)
+        # Request extra results from Tavily as buffer for filtering
+        tavily_limit = max(5, self.config.search.results_per_query * 3)
+        results = web_search(query, max_results=tavily_limit)
         logger.info(f"Search returned {len(results)} results")
 
         for r in results:
@@ -1154,72 +1178,86 @@ class ResearcherAgent:
     ) -> Tuple[str, int]:
         """Execute searches in parallel, extract per-source content, and aggregate results.
 
+        Each query contributes up to ``results_per_query`` sources so that every
+        query is represented in the final context.
+
         Returns (context_string, source_count).
         """
-        logger.info(f"Executing searches with {len(queries)} queries")
+        results_per_query = self.config.search.results_per_query
+        logger.info(
+            f"Executing searches with {len(queries)} queries, "
+            f"{results_per_query} results per query"
+        )
 
-        # Phase 1: Run all search queries in parallel
-        all_results = []
-        seen_urls = set()
+        # Phase 1: Run all search queries in parallel, track per-query results
+        query_results: Dict[int, List[dict]] = {}
 
         with ThreadPoolExecutor(max_workers=len(queries)) as executor:
-            futures = [
-                executor.submit(self._search_single_query, q, task_id, session_id)
-                for q in queries
-            ]
+            futures = {
+                executor.submit(self._search_single_query, q, task_id, session_id): i
+                for i, q in enumerate(queries)
+            }
             for future in as_completed(futures):
+                qi = futures[future]
                 try:
-                    for r in future.result():
-                        url = r.get('url', '')
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            all_results.append(r)
+                    query_results[qi] = future.result()
                 except Exception as e:
-                    logger.warning(f"Search query failed: {e}")
+                    logger.warning(f"Search query {qi} failed: {e}")
+                    query_results[qi] = []
 
-        logger.info(f"Total unique results: {len(all_results)}")
+        total_raw = sum(len(r) for r in query_results.values())
+        logger.info(f"Total raw results across {len(queries)} queries: {total_raw}")
 
-        # Phase 2: Scrape and save sources
+        # Phase 2: For each query (in order), scrape up to results_per_query sources.
+        # URLs are deduped across queries so the same page isn't scraped twice.
         saved_sources = []  # list of (position, Source pydantic object with id)
-        sources_added = 0
-        max_sources = self.config.search.max_results
+        seen_urls: set = set()
+        source_counter = 0
         min_tavily = getattr(self.config.search, 'min_tavily_score', 0.3)
 
-        for result in all_results[:max_sources * 2]:  # Check more than needed
-            url = result.get('url', '')
-            if not url:
-                continue
+        for qi in sorted(query_results.keys()):
+            results = query_results[qi]
+            query_source_count = 0
 
-            if is_blocked_source(url):
-                logger.info(f"Blocked source (skipping): {url}")
-                continue
+            for result in results:
+                if query_source_count >= results_per_query:
+                    break
 
-            tavily_score = result.get('score', 1.0)
-            if tavily_score < min_tavily:
-                logger.info(f"Low Tavily score ({tavily_score:.2f}), skipping: {url}")
-                continue
+                url = result.get('url', '')
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)  # mark seen regardless of outcome
 
-            try:
-                print_scrape(url)
-                source = extract_source_info(url, result)
-                logger.info(f"Source: {url[:60]} quality={source.quality_score} content_len={len(source.full_content or '')}")
-
-                if source.quality_score < self.config.quality.min_source_quality:
-                    logger.info(f"Skipping low-quality source: {url}")
+                if is_blocked_source(url):
+                    logger.info(f"Blocked source (skipping): {url}")
                     continue
 
-                content = source.full_content or source.snippet or ""
-                if content:
-                    db_source = self.db.add_source(source, task_id, position=sources_added)
-                    saved_sources.append((sources_added, source, db_source))
-                    sources_added += 1
+                tavily_score = result.get('score', 1.0)
+                if tavily_score < min_tavily:
+                    logger.info(f"Low Tavily score ({tavily_score:.2f}), skipping: {url}")
+                    continue
 
-                    if sources_added >= max_sources:
-                        break
+                try:
+                    print_scrape(url)
+                    source = extract_source_info(url, result)
+                    logger.info(f"Source: {url[:60]} quality={source.quality_score} content_len={len(source.full_content or '')}")
 
-            except Exception as e:
-                logger.warning(f"Failed to extract from {url}: {e}")
-                continue
+                    if source.quality_score < self.config.quality.min_source_quality:
+                        logger.info(f"Skipping low-quality source: {url}")
+                        continue
+
+                    content = source.full_content or source.snippet or ""
+                    if content:
+                        db_source = self.db.add_source(source, task_id, position=source_counter)
+                        saved_sources.append((source_counter, source, db_source))
+                        source_counter += 1
+                        query_source_count += 1
+
+                except Exception as e:
+                    logger.warning(f"Failed to extract from {url}: {e}")
+                    continue
+
+            logger.info(f"Query {qi}: kept {query_source_count}/{results_per_query} sources")
 
         # Phase 3: Run LLM extraction on each source in parallel
         extraction_results = {}  # position -> extracted_content
@@ -1276,7 +1314,7 @@ class ResearcherAgent:
                     f"{content_str}\n"
                 )
 
-        return "\n\n---\n\n".join(context_parts), sources_added
+        return "\n\n---\n\n".join(context_parts), source_counter
 
     def _identify_gaps(
         self, task: ResearchTask, search_context: str, overall_query: str

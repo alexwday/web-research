@@ -956,6 +956,48 @@ class DatabaseManager:
                 SearchEventModel.session_id == session_id
             ).order_by(SearchEventModel.created_at).all()
 
+    def get_rejected_search_results(self, session_id: int) -> List[Dict[str, Any]]:
+        """Return search result events whose URLs were NOT saved as sources.
+
+        These are results that were quality-rejected during scraping/filtering.
+        Returns list of dicts with url, title, snippet, quality_score, task_id, query_group.
+        """
+        with self.get_sync_session() as session:
+            # Get all source URLs for this session
+            source_urls = set()
+            src_rows = session.query(SourceModel.url).join(
+                task_source_association,
+                SourceModel.id == task_source_association.c.source_id
+            ).join(
+                TaskModel,
+                TaskModel.id == task_source_association.c.task_id
+            ).filter(TaskModel.session_id == session_id).all()
+            for (url,) in src_rows:
+                source_urls.add(url)
+
+            # Get all result events not in source_urls
+            events = session.query(SearchEventModel).filter(
+                SearchEventModel.session_id == session_id,
+                SearchEventModel.event_type == "result",
+                SearchEventModel.url != None,  # noqa: E711
+            ).order_by(SearchEventModel.created_at).all()
+
+            rejected = []
+            seen_urls = set()
+            for ev in events:
+                if ev.url in source_urls or ev.url in seen_urls:
+                    continue
+                seen_urls.add(ev.url)
+                rejected.append({
+                    "url": ev.url,
+                    "title": ev.title or "Untitled",
+                    "snippet": ev.snippet or "",
+                    "quality_score": ev.quality_score,
+                    "task_id": ev.task_id,
+                    "query_group": ev.query_group,
+                })
+            return rejected
+
     def get_search_queries_by_task(self, session_id: int) -> Dict[int, List[Dict]]:
         """Return {task_id: [{query_text, query_group}, ...]} for query events in a session."""
         result: Dict[int, List[Dict]] = {}
