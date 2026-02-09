@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
-    DateTime, ForeignKey, Table
+    DateTime, ForeignKey, Index, Table
 )
 from sqlalchemy.orm import declarative_base, relationship, backref
 
@@ -128,21 +128,29 @@ class GlossaryModel(Base):
         )
 
 
-class SearchEventModel(Base):
-    """SQLAlchemy model for search activity events (queries and results)"""
-    __tablename__ = 'search_events'
+class RunEventModel(Base):
+    """SQLAlchemy model for run activity events."""
+    __tablename__ = 'run_events'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey('sessions.id'), nullable=True)
-    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)  # null = planning phase
-    event_type = Column(String(20), nullable=False)  # "query" or "result"
-    query_group = Column(String(50), nullable=False)  # links results to their parent query
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    event_type = Column(String(30), nullable=False)
+    query_group = Column(String(50), nullable=True)
     query_text = Column(String(1000), nullable=True)
     url = Column(String(2000), nullable=True)
     title = Column(String(500), nullable=True)
     snippet = Column(Text, nullable=True)
     quality_score = Column(Float, nullable=True)
+    phase = Column(String(30), nullable=True)
+    severity = Column(String(10), nullable=True)
+    payload_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index('ix_run_events_timeline', 'session_id', 'created_at', 'id'),
+        Index('ix_run_events_type', 'session_id', 'event_type'),
+    )
 
 
 class SectionModel(Base):

@@ -301,24 +301,24 @@ class TestGlossaryCRUD:
 
 
 # =========================================================================
-# Search events
+# Run events
 # =========================================================================
 
-class TestSearchEvents:
-    def test_add_and_get_search_events(self, db):
+class TestRunEvents:
+    def test_add_and_get_run_events(self, db):
         session = db.create_session("Q")
         task = db.add_task(
             ResearchTask(topic="T", description="D", file_path="/tmp/t.md"),
             session_id=session.id,
         )
-        db.add_search_event(
+        db.add_run_event(
             session_id=session.id,
             task_id=task.id,
             event_type="query",
             query_group="group_1",
             query_text="test query",
         )
-        db.add_search_event(
+        db.add_run_event(
             session_id=session.id,
             task_id=task.id,
             event_type="result",
@@ -326,24 +326,57 @@ class TestSearchEvents:
             url="https://example.com",
             title="Example Result",
         )
-        events = db.get_search_events(session.id)
+        events = db.get_run_events(session.id)
         assert len(events) == 2
 
-    def test_search_queries_by_task(self, db):
+    def test_run_queries_by_task(self, db):
         session = db.create_session("Q")
         task = db.add_task(
             ResearchTask(topic="T", description="D", file_path="/tmp/t.md"),
             session_id=session.id,
         )
-        db.add_search_event(
+        db.add_run_event(
             session_id=session.id,
             task_id=task.id,
             event_type="query",
             query_group="g1",
             query_text="search query 1",
         )
-        by_task = db.get_search_queries_by_task(session.id)
+        by_task = db.get_run_queries_by_task(session.id)
         assert task.id in by_task
+
+    def test_run_event_new_columns(self, db):
+        """Round-trip phase, severity, and payload_json columns."""
+        session = db.create_session("Q")
+        db.add_run_event(
+            session_id=session.id,
+            task_id=None,
+            event_type="phase_changed",
+            phase="pre_planning",
+            severity="info",
+            payload_json='{"old_phase": "idle", "new_phase": "pre_planning"}',
+        )
+        events = db.get_run_events(session.id)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.event_type == "phase_changed"
+        assert ev.phase == "pre_planning"
+        assert ev.severity == "info"
+        assert '"old_phase"' in ev.payload_json
+
+    def test_run_event_nullable_query_group(self, db):
+        """Phase events have query_group=None."""
+        session = db.create_session("Q")
+        db.add_run_event(
+            session_id=session.id,
+            task_id=None,
+            event_type="phase_changed",
+            phase="compiling",
+            severity="info",
+        )
+        events = db.get_run_events(session.id)
+        assert len(events) == 1
+        assert events[0].query_group is None
 
 
 # =========================================================================

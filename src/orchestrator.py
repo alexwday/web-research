@@ -69,6 +69,21 @@ class ResearchOrchestrator:
         print_warning("\nShutdown signal received. Completing current task...")
         self.is_running = False
 
+    def _set_phase(self, new_phase: str):
+        """Set phase and emit a phase_changed run event."""
+        import json as _json
+        old_phase = self.phase
+        self.phase = new_phase
+        if self.session_id is not None:
+            self.db.add_run_event(
+                session_id=self.session_id,
+                task_id=None,
+                event_type="phase_changed",
+                phase=new_phase,
+                severity="info",
+                payload_json=_json.dumps({"old_phase": old_phase, "new_phase": new_phase}),
+            )
+
     def run(self, query: str, resume: bool = False,
             refined_brief: str = None, refinement_qa: str = None) -> dict:
         """
@@ -113,7 +128,7 @@ class ResearchOrchestrator:
 
             if not existing_sections:
                 # Phase 1: Deep Pre-Planning
-                self.phase = "pre_planning"
+                self._set_phase("pre_planning")
                 print_info("Phase 1: Deep pre-planning...")
                 pre_plan_ctx = self.planner.run_pre_planning(self.query, self.session_id)
 
@@ -121,7 +136,7 @@ class ResearchOrchestrator:
                     return self._emergency_compile()
 
                 # Phase 2: Report Outline
-                self.phase = "outline_design"
+                self._set_phase("outline_design")
                 print_info("Phase 2: Designing report outline...")
                 sections = self.outline_designer.design_outline(self.query, pre_plan_ctx, self.session_id)
                 print_success(f"Designed outline with {len(sections)} sections")
@@ -130,7 +145,7 @@ class ResearchOrchestrator:
                     return self._emergency_compile()
 
                 # Phase 3: Task Planning per Section (parallel)
-                self.phase = "task_planning"
+                self._set_phase("task_planning")
                 print_info("Phase 3: Planning research tasks per section...")
                 max_total = self.config.research.max_total_tasks
                 budget_per_section = max(1, max_total // len(sections)) if sections else max_total
@@ -166,7 +181,7 @@ class ResearchOrchestrator:
                 return self._emergency_compile()
 
             # Phase 4: Research Execution
-            self.phase = "researching"
+            self._set_phase("researching")
             print_info("Phase 4: Executing research tasks...")
             self._run_research_loop()
 
@@ -174,7 +189,7 @@ class ResearchOrchestrator:
                 return self._emergency_compile()
 
             # Phase 5: Gap Analysis & Fill
-            self.phase = "gap_analysis"
+            self._set_phase("gap_analysis")
             print_info("Phase 5: Gap analysis...")
             # Reload sections in case they were modified
             sections = self.db.get_all_sections(session_id=self.session_id)
@@ -183,7 +198,7 @@ class ResearchOrchestrator:
                 print_info(f"Gap analysis created {gap_result['new_tasks']} new tasks, "
                           f"{gap_result.get('new_sections', 0)} new sections")
                 # Execute gap-fill research tasks
-                self.phase = "researching"
+                self._set_phase("researching")
                 print_info("Executing gap-fill research tasks...")
                 self._run_research_loop()
 
@@ -191,18 +206,18 @@ class ResearchOrchestrator:
                 return self._emergency_compile()
 
             # Phase 6: Section Synthesis
-            self.phase = "synthesizing"
+            self._set_phase("synthesizing")
             print_info("Phase 6: Synthesizing sections...")
             sections = self.db.get_all_sections(session_id=self.session_id)
             self._synthesize_all_sections(self.query, sections)
 
             # Phase 7: Compile
-            self.phase = "compiling"
+            self._set_phase("compiling")
             print_info("Phase 7: Compiling final report...")
             output_files = self._compile_final_report()
 
             # Cleanup and Statistics
-            self.phase = "complete"
+            self._set_phase("complete")
             return self._finalize(output_files)
 
         except KeyboardInterrupt:
@@ -569,7 +584,7 @@ class ResearchOrchestrator:
             futures = {}
 
             if self.config.output.include_summary:
-                self.db.add_search_event(
+                self.db.add_run_event(
                     session_id=self.session_id, task_id=None,
                     event_type="agent_action", query_group="exec_summary",
                     query_text="Generating executive summary",
@@ -579,7 +594,7 @@ class ResearchOrchestrator:
                     self.query, section_summaries, report_structure
                 )] = 'summary'
 
-            self.db.add_search_event(
+            self.db.add_run_event(
                 session_id=self.session_id, task_id=None,
                 event_type="agent_action", query_group="conclusion",
                 query_text="Generating conclusion",

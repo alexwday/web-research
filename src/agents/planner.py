@@ -133,7 +133,7 @@ Provide a thorough analysis of the topic landscape based on these sources."""
         """Execute a single pre-planning search query. Thread-safe."""
         qg = uuid.uuid4().hex[:12]
         print_search(f"[pre-plan] {q}")
-        self.db.add_search_event(
+        self.db.add_run_event(
             session_id=session_id, task_id=None,
             event_type="query", query_group=qg, query_text=q,
         )
@@ -141,7 +141,7 @@ Provide a thorough analysis of the topic landscape based on these sources."""
         for hit in hits:
             url = hit.get("url", "")
             if url:
-                self.db.add_search_event(
+                self.db.add_run_event(
                     session_id=session_id, task_id=None,
                     event_type="result", query_group=qg,
                     url=url,

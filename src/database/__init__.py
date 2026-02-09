@@ -11,7 +11,7 @@ from .orm_models import (
     TaskModel,
     SourceModel,
     GlossaryModel,
-    SearchEventModel,
+    RunEventModel,
     SectionModel,
     SessionModel,
 )

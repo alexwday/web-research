@@ -340,7 +340,7 @@ class ResearcherAgent:
         qg = uuid.uuid4().hex[:12]
         print_search(query)
         logger.info(f"Searching: {query}")
-        self.db.add_search_event(
+        self.db.add_run_event(
             session_id=session_id, task_id=task_id,
             event_type="query", query_group=qg, query_text=query,
         )
@@ -352,7 +352,7 @@ class ResearcherAgent:
         for r in results:
             url = r.get('url', '')
             if url:
-                self.db.add_search_event(
+                self.db.add_run_event(
                     session_id=session_id, task_id=task_id,
                     event_type="result", query_group=qg,
                     url=url,

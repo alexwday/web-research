@@ -96,7 +96,7 @@ def _build_activity_log_context(session_id: Optional[int]) -> dict:
         return _empty_activity_log_context()
 
     db = _db()
-    events = db.get_search_events(session_id)
+    events = db.get_run_events(session_id)
     if not events:
         return _empty_activity_log_context()
 
@@ -245,7 +245,7 @@ def _build_flat_activity_context(session_id: Optional[int]) -> dict:
         return empty
 
     db = _db()
-    events = db.get_search_events(session_id)
+    events = db.get_run_events(session_id)
     if not events:
         return empty
 
@@ -463,7 +463,7 @@ def _build_source_groups(db, sid, task_id=None, include_rejected=False):
 
     # Add rejected search results (from search events not saved as sources)
     if include_rejected and sid:
-        rejected = db.get_rejected_search_results(sid)
+        rejected = db.get_rejected_results(sid)
         for r in rejected:
             if task_id is not None and r["task_id"] != task_id:
                 continue
@@ -1107,7 +1107,7 @@ async def fragment_task_list(request: Request, status: Optional[str] = None, ses
     else:
         task_list = db.get_all_tasks(session_id=sid)
 
-    task_queries = db.get_search_queries_by_task(sid) if sid else {}
+    task_queries = db.get_run_queries_by_task(sid) if sid else {}
 
     return templates.TemplateResponse("fragments/task_list.html", {
         "request": request,

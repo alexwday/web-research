@@ -12,7 +12,7 @@ from ..config import (
 )
 from .orm_models import (
     Base, task_source_association,
-    TaskModel, SourceModel, GlossaryModel, SearchEventModel,
+    TaskModel, SourceModel, GlossaryModel, RunEventModel,
     SectionModel, SessionModel,
 )
 
@@ -60,6 +60,7 @@ class DatabaseManager:
         self._migrate_section_tables()
         self._migrate_refinement_columns()
         self._migrate_source_columns()
+        self._migrate_run_events()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -161,6 +162,28 @@ class DatabaseManager:
                     "ALTER TABLE sources ADD COLUMN extracted_content TEXT"
                 ))
                 conn.commit()
+
+    def _migrate_run_events(self):
+        """Migrate search_events -> run_events for existing databases."""
+        with self.engine.connect() as conn:
+            old_exists = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='search_events'"
+            )).fetchone()
+            if not old_exists:
+                return  # Fresh DB or already migrated
+
+            # Copy data (new columns get NULL)
+            conn.execute(text("""
+                INSERT INTO run_events (id, session_id, task_id, event_type, query_group,
+                                        query_text, url, title, snippet, quality_score,
+                                        phase, severity, payload_json, created_at)
+                SELECT id, session_id, task_id, event_type, query_group,
+                       query_text, url, title, snippet, quality_score,
+                       NULL, NULL, NULL, created_at
+                FROM search_events
+            """))
+            conn.execute(text("DROP TABLE search_events"))
+            conn.commit()
 
     def get_sync_session(self):
         """Get a synchronous session"""
@@ -724,25 +747,25 @@ class DatabaseManager:
             return [r.to_pydantic() for r in results]
 
     # =========================================================================
-    # SEARCH EVENT OPERATIONS
+    # RUN EVENT OPERATIONS
     # =========================================================================
 
-    def add_search_event(self, **kwargs) -> None:
-        """Insert a search event (query or result)."""
+    def add_run_event(self, **kwargs) -> None:
+        """Insert a run event (query, result, phase_changed, etc.)."""
         with self.get_sync_session() as session:
-            event = SearchEventModel(**kwargs)
+            event = RunEventModel(**kwargs)
             session.add(event)
             session.commit()
 
-    def get_search_events(self, session_id: int) -> List[SearchEventModel]:
-        """Get all search events for a session, ordered by created_at."""
+    def get_run_events(self, session_id: int) -> List[RunEventModel]:
+        """Get all run events for a session, ordered by created_at."""
         with self.get_sync_session() as session:
-            return session.query(SearchEventModel).filter(
-                SearchEventModel.session_id == session_id
-            ).order_by(SearchEventModel.created_at).all()
+            return session.query(RunEventModel).filter(
+                RunEventModel.session_id == session_id
+            ).order_by(RunEventModel.created_at).all()
 
-    def get_rejected_search_results(self, session_id: int) -> List[Dict[str, Any]]:
-        """Return search result events whose URLs were NOT saved as sources.
+    def get_rejected_results(self, session_id: int) -> List[Dict[str, Any]]:
+        """Return result events whose URLs were NOT saved as sources.
 
         These are results that were quality-rejected during scraping/filtering.
         Returns list of dicts with url, title, snippet, quality_score, task_id, query_group.
@@ -761,11 +784,11 @@ class DatabaseManager:
                 source_urls.add(url)
 
             # Get all result events not in source_urls
-            events = session.query(SearchEventModel).filter(
-                SearchEventModel.session_id == session_id,
-                SearchEventModel.event_type == "result",
-                SearchEventModel.url != None,  # noqa: E711
-            ).order_by(SearchEventModel.created_at).all()
+            events = session.query(RunEventModel).filter(
+                RunEventModel.session_id == session_id,
+                RunEventModel.event_type == "result",
+                RunEventModel.url != None,  # noqa: E711
+            ).order_by(RunEventModel.created_at).all()
 
             rejected = []
             seen_urls = set()
@@ -783,15 +806,15 @@ class DatabaseManager:
                 })
             return rejected
 
-    def get_search_queries_by_task(self, session_id: int) -> Dict[int, List[Dict]]:
+    def get_run_queries_by_task(self, session_id: int) -> Dict[int, List[Dict]]:
         """Return {task_id: [{query_text, query_group}, ...]} for query events in a session."""
         result: Dict[int, List[Dict]] = {}
         with self.get_sync_session() as session:
-            events = session.query(SearchEventModel).filter(
-                SearchEventModel.session_id == session_id,
-                SearchEventModel.task_id != None,  # noqa: E711
-                SearchEventModel.event_type == "query",
-            ).order_by(SearchEventModel.created_at).all()
+            events = session.query(RunEventModel).filter(
+                RunEventModel.session_id == session_id,
+                RunEventModel.task_id != None,  # noqa: E711
+                RunEventModel.event_type == "query",
+            ).order_by(RunEventModel.created_at).all()
             for ev in events:
                 result.setdefault(ev.task_id, []).append({
                     "query_text": ev.query_text or "",
