@@ -34,6 +34,7 @@ def isolated_environment(tmp_path):
     """
     from src.config import Config, set_config
     from src import database as db_mod
+    from src import service as svc_mod
 
     db_file = str(tmp_path / "test_research.db")
     output_dir = str(tmp_path / "report")
@@ -57,11 +58,17 @@ def isolated_environment(tmp_path):
     with db_mod._db_lock:
         db_mod._db = None
 
+    # Reset service singleton so it doesn't carry state across tests
+    with svc_mod._service_lock:
+        svc_mod._service = None
+
     yield config
 
     # Teardown: reset singletons
     with db_mod._db_lock:
         db_mod._db = None
+    with svc_mod._service_lock:
+        svc_mod._service = None
     set_config(Config())  # restore pristine defaults
 
 

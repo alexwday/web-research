@@ -13,7 +13,7 @@ from rich.prompt import Prompt, Confirm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.utils.rbc_security import configure_rbc_security_certs
-from src.orchestrator import run_research
+from src.service import get_service
 from src.database import get_database, reset_database
 from src.config import load_config, get_env_settings, set_config
 from src.llm_client import get_llm_client
@@ -80,7 +80,7 @@ def research(
     
     # Run research
     try:
-        result = run_research(query or "", resume=resume)
+        result = get_service().start_run(query or "", resume=resume, blocking=True)
         
         if "error" in result:
             print_error(f"Research failed: {result['error']}")
@@ -103,28 +103,31 @@ def status():
     """
     Show the status of the current research session.
     """
+    info = get_service().get_run_status()
+
+    if info.get("status") == "no_session":
+        print_info("No research session found.")
+        return
+
+    sid = info["session_id"]
+    # Fetch session object for display fields
     db = get_database()
-    
-    session = db.get_current_session()
-    if not session:
-        session = db.get_most_recent_session()
-        if not session:
-            print_info("No research session found.")
-            return
+    session = db.get_session_by_id(sid)
+
+    if session.status != "running":
         print_info("No active session. Showing most recent session.")
-    
+
     print_header(
         "Research Session Status",
-        f"Session #{session.id}"
+        f"Session #{sid}"
     )
-    
+
     query_display = session.query[:200] + ("..." if len(session.query) > 200 else "")
     console.print(f"\n[cyan]Query:[/cyan] {query_display}")
     console.print(f"[cyan]Started:[/cyan] {session.started_at}")
     console.print(f"[cyan]Status:[/cyan] {session.status}")
-    
-    stats = db.get_statistics(session_id=session.id)
-    print_statistics_table(stats)
+
+    print_statistics_table(info["statistics"])
 
 
 @app.command()
