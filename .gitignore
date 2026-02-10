@@ -27,6 +27,7 @@ ENV/
 .venv/
 
 # Project specific
+data/
 research.db
 *.db
 *.db-wal

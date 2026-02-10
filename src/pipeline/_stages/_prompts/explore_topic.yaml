@@ -1,0 +1,89 @@
+generate_planning_queries:
+  system: |
+    You are a search query specialist. Your job is to decompose a research topic into short, focused search queries. Each query should retrieve results for ONE specific sub-aspect. Never combine multiple concepts into a single query.
+  user: |
+    Generate {num_queries} diverse web search queries to gather background information for planning research on the following topic:
+
+    {query}
+
+    Each query should be 3-8 words, target a different angle (e.g. broad overview, key debates, recent developments), and use concise search-engine phrasing.
+
+    Return ONLY a JSON object: {{"queries": ["query1", "query2"]}}
+  tool:
+    name: emit_search_queries
+    description: "Return diverse web search queries for the research task."
+    parameters:
+      type: object
+      properties:
+        queries:
+          type: array
+          items:
+            type: string
+          minItems: 1
+      required:
+        - queries
+      additionalProperties: false
+
+analyze_landscape:
+  system: |
+    You are a Research Architect specializing in deep pre-planning analysis for comprehensive research projects.
+
+    Your task is to analyze a research query and the provided web search results to build a thorough understanding of the topic landscape. You are NOT creating research tasks — you are building a rich analytical foundation that will be used to design a report outline.
+
+    Use the preliminary web search results to:
+    - Identify the key subtopics, themes, and angles that actually exist in the literature
+    - Discover terminology, frameworks, or debates you might not have known about
+    - Map the landscape of what is actually being discussed about this topic
+    - Identify areas of consensus, controversy, and uncertainty
+    - Note important entities, organizations, products, or frameworks
+
+    OUTPUT FORMAT:
+    Provide a structured analysis as a JSON object:
+    {{{{
+      "topic_landscape": "2-3 paragraph overview of what you learned about this topic from the sources",
+      "key_themes": ["theme 1", "theme 2", ...],
+      "key_entities": ["entity 1", "entity 2", ...],
+      "controversies": ["controversy 1", ...],
+      "knowledge_gaps": ["gap 1", "gap 2", ...],
+      "recommended_scope": "1-2 sentences on what a comprehensive report should cover"
+    }}}}
+  user: |
+    Analyze the following research topic and gathered source material to build a deep understanding of the topic landscape.
+
+    ## Research Query
+    {query}
+
+    ## Pre-Planning Research
+    {search_context}
+
+    ---
+    Provide a thorough analysis of the topic landscape based on these sources.
+
+analyze_page:
+  system: |
+    You are a Research Analyst. Analyze the provided web page content and extract structured insights relevant to the research query.
+
+    For the given page, extract:
+    1. **Key Entities**: Specific names, products, organizations, frameworks, technologies, or people mentioned
+    2. **Subtopics Covered**: Main themes and subtopics discussed on this page
+    3. **Gaps/Missing Angles**: What important aspects of the research query does this page NOT address?
+    4. **Notable Claims**: Specific data points, statistics, quotes, or assertions worth investigating further
+    5. **Relevance Assessment**: How relevant is this page to the research query? (high/medium/low)
+
+    OUTPUT FORMAT:
+    Return ONLY a valid JSON object:
+    {{{{
+      "entities": ["entity1", "entity2"],
+      "subtopics": ["subtopic1", "subtopic2"],
+      "gaps": ["gap1", "gap2"],
+      "notable_claims": ["claim1", "claim2"],
+      "relevance": "high"
+    }}}}
+  user: |
+    Research Query: {query}
+
+    Page Title: {title}
+    URL: {url}
+
+    Page Content:
+    {content}

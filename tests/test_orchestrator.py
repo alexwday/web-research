@@ -1,5 +1,5 @@
 """
-Tests for src.orchestrator.ResearchOrchestrator — end-to-end pipeline
+Tests for src.pipeline.ResearchOrchestrator — end-to-end pipeline
 with mocked LLM agents and search calls.
 
 Verifies: session creation, 7-phase progression, task creation,
@@ -11,11 +11,12 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from src.config import (
+from src.config.types import (
     ResearchTask, ReportSection, Source, GlossaryTerm,
-    TaskStatus, SectionStatus, get_config,
+    TaskStatus, SectionStatus,
 )
-from src.database import get_database
+from src.config.settings import get_config
+from src.infra._database import get_database
 
 
 # ---------------------------------------------------------------------------
@@ -103,38 +104,38 @@ class TestOrchestratorPipeline:
         """Patch all agent methods and file I/O on the orchestrator."""
         patches = [
             # Agent methods
-            patch("src.agents.PlannerAgent.run_pre_planning",
+            patch("src.pipeline._stages.PlannerAgent.run_pre_planning",
                   return_value="Pre-planning context: topic is well-studied."),
-            patch("src.agents.OutlineDesignerAgent.design_outline",
+            patch("src.pipeline._stages.OutlineDesignerAgent.design_outline",
                   side_effect=_mock_design_outline),
-            patch("src.agents.SectionTaskPlannerAgent.plan_tasks_for_section",
+            patch("src.pipeline._stages.SectionTaskPlannerAgent.plan_tasks_for_section",
                   side_effect=_mock_plan_tasks),
-            patch("src.agents.ResearcherAgent.research_task",
+            patch("src.pipeline._stages.ResearcherAgent.research_task",
                   side_effect=_mock_research_task),
-            patch("src.agents.GapAnalysisAgent.analyze_gaps",
+            patch("src.pipeline._stages.GapAnalysisAgent.analyze_gaps",
                   return_value={"new_tasks": 0, "new_sections": 0}),
-            patch("src.agents.SynthesisAgent.synthesize_section",
+            patch("src.pipeline._stages.SynthesisAgent.synthesize_section",
                   side_effect=_mock_synthesize_section),
-            patch("src.agents.EditorAgent.generate_executive_summary",
+            patch("src.pipeline._stages.EditorAgent.generate_executive_summary",
                   return_value="Executive summary: This report covers the research topic comprehensively."),
-            patch("src.agents.EditorAgent.generate_conclusion",
+            patch("src.pipeline._stages.EditorAgent.generate_conclusion",
                   return_value="Conclusion: The research reveals important findings across all areas studied."),
             # File I/O
-            patch("src.orchestrator.save_markdown"),
-            patch("src.orchestrator.read_file", return_value="mock file content"),
+            patch("src.pipeline.orchestrator.save_markdown"),
+            patch("src.pipeline.orchestrator.read_file", return_value="mock file content"),
             # Suppress Rich console output during tests
-            patch("src.orchestrator.print_header"),
-            patch("src.orchestrator.print_info"),
-            patch("src.orchestrator.print_success"),
-            patch("src.orchestrator.print_warning"),
-            patch("src.orchestrator.print_error"),
-            patch("src.orchestrator.print_task_start"),
-            patch("src.orchestrator.print_write"),
-            patch("src.orchestrator.print_statistics_table"),
-            patch("src.orchestrator.print_task_table"),
-            patch("src.orchestrator.print_completion_summary"),
-            patch("src.orchestrator.console"),
-            patch("src.orchestrator.create_progress_bar"),
+            patch("src.pipeline.orchestrator.print_header"),
+            patch("src.pipeline.orchestrator.print_info"),
+            patch("src.pipeline.orchestrator.print_success"),
+            patch("src.pipeline.orchestrator.print_warning"),
+            patch("src.pipeline.orchestrator.print_error"),
+            patch("src.pipeline.orchestrator.print_task_start"),
+            patch("src.pipeline.orchestrator.print_write"),
+            patch("src.pipeline.orchestrator.print_statistics_table"),
+            patch("src.pipeline.orchestrator.print_task_table"),
+            patch("src.pipeline.orchestrator.print_completion_summary"),
+            patch("src.pipeline.orchestrator.console"),
+            patch("src.pipeline.orchestrator.create_progress_bar"),
         ]
         mocks = [p.start() for p in patches]
         # Make the progress bar context manager work
@@ -151,7 +152,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_creates_session(self, orchestrator_mocks, test_config, tmp_path):
         """The orchestrator should create a session in the database."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -164,7 +165,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_progresses_through_phases(self, orchestrator_mocks, test_config, tmp_path):
         """The orchestrator should end in 'complete' phase."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -174,7 +175,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_creates_sections(self, orchestrator_mocks, test_config, tmp_path):
         """Sections should be created during the outline design phase."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -188,7 +189,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_creates_tasks(self, orchestrator_mocks, test_config, tmp_path):
         """Tasks should be created for each section during task planning."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -200,7 +201,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_completes_tasks(self, orchestrator_mocks, test_config, tmp_path):
         """All tasks should be marked completed after research execution."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -213,7 +214,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_synthesizes_sections(self, orchestrator_mocks, test_config, tmp_path):
         """Sections should have synthesized content after synthesis phase."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -227,7 +228,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_produces_report(self, orchestrator_mocks, test_config, tmp_path):
         """The pipeline should produce output files."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -240,7 +241,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_stores_session_artifacts(self, orchestrator_mocks, test_config, tmp_path):
         """Session should have executive summary, conclusion, and report paths stored."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -254,7 +255,7 @@ class TestOrchestratorPipeline:
 
     def test_full_pipeline_returns_statistics(self, orchestrator_mocks, test_config, tmp_path):
         """The result dict should include statistics."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         test_config.output.directory = str(tmp_path / "report")
         orch = ResearchOrchestrator(register_signals=False)
@@ -270,7 +271,7 @@ class TestOrchestratorSessionManagement:
     """Test session initialization and resume logic."""
 
     def test_initialize_session(self, test_config):
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         orch = ResearchOrchestrator(register_signals=False)
         session = orch._initialize_session("Test query")
@@ -278,7 +279,7 @@ class TestOrchestratorSessionManagement:
         assert session.query == "Test query"
 
     def test_initialize_session_with_refinement(self, test_config):
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         orch = ResearchOrchestrator(register_signals=False)
         session = orch._initialize_session(

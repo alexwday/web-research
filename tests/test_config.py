@@ -3,16 +3,15 @@ Tests for src.config — configuration loading, presets, and overrides.
 """
 import pytest
 
-from src.config import (
-    Config, apply_overrides, RESEARCH_PRESETS,
-    TaskStatus, SectionStatus,
-)
+from src.config.settings import Config, apply_overrides
+from src.config.presets import RESEARCH_PRESETS
+from src.config.types import TaskStatus, SectionStatus
 
 
 class TestConfigDefaults:
     def test_default_config_creation(self):
         config = Config()
-        assert config.database.path == "research_state.db"
+        assert config.database.path == "data/research_state.db"
         assert config.research.max_total_tasks == 200
         assert config.output.directory == "report"
         assert "markdown" in config.output.formats

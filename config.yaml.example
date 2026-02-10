@@ -212,7 +212,7 @@ logging:
 # =============================================================================
 database:
   # SQLite database file
-  path: "research_state.db"
+  path: "data/research_state.db"
 
   # Enable WAL mode for better concurrency
   wal_mode: true

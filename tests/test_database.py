@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.config import (
+from src.config.types import (
     TaskStatus, SectionStatus, ResearchTask, ReportSection,
     Source, GlossaryTerm,
 )
@@ -225,8 +225,8 @@ class TestSectionCRUD:
 
     def test_get_tasks_for_section(self, populated_db):
         """Verify tasks are correctly associated with their section."""
-        db_mod = __import__("src.database", fromlist=["get_database"])
-        db = db_mod.get_database()
+        from src.infra._database import get_database as _get_db
+        db = _get_db()
         section = populated_db.sections[0]
         tasks = db.get_tasks_for_section(section.id)
         assert len(tasks) == 2
@@ -267,14 +267,14 @@ class TestSourceCRUD:
         assert found.title == "Unique"
 
     def test_get_sources_for_session(self, populated_db):
-        db_mod = __import__("src.database", fromlist=["get_database"])
-        db = db_mod.get_database()
+        from src.infra._database import get_database as _get_db
+        db = _get_db()
         sources = db.get_sources_for_session(populated_db.session.id)
         assert len(sources) >= 2
 
     def test_get_source_count(self, populated_db):
-        db_mod = __import__("src.database", fromlist=["get_database"])
-        db = db_mod.get_database()
+        from src.infra._database import get_database as _get_db
+        db = _get_db()
         count = db.get_source_count(populated_db.session.id)
         assert count >= 2
 
@@ -293,8 +293,8 @@ class TestGlossaryCRUD:
         assert term.id is not None
 
     def test_get_glossary_terms_for_session(self, populated_db):
-        db_mod = __import__("src.database", fromlist=["get_database"])
-        db = db_mod.get_database()
+        from src.infra._database import get_database as _get_db
+        db = _get_db()
         terms = db.get_glossary_terms_for_session(populated_db.session.id)
         assert len(terms) == 1
         assert terms[0].term == "Alignment"
@@ -385,8 +385,8 @@ class TestRunEvents:
 
 class TestStatistics:
     def test_get_statistics(self, populated_db):
-        db_mod = __import__("src.database", fromlist=["get_database"])
-        db = db_mod.get_database()
+        from src.infra._database import get_database as _get_db
+        db = _get_db()
         stats = db.get_statistics(session_id=populated_db.session.id)
         assert stats["total_tasks"] == 6  # 2 per section, 3 sections
         assert stats["pending_tasks"] == 6

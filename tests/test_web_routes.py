@@ -9,9 +9,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from src.web.app import create_app
-from src.database import get_database
-from src.config import (
+from src.adapters.web.app import create_app
+from src.infra._database import get_database
+from src.config.types import (
     ResearchTask, ReportSection, Source, GlossaryTerm, TaskStatus,
 )
 
@@ -23,9 +23,9 @@ def client(populated_db):
     Patches is_research_running and get_current_phase so routes that
     check background thread state don't fail.
     """
-    with patch("src.web.app.is_research_running", return_value=False), \
-         patch("src.web.app.get_current_phase", return_value="idle"), \
-         patch("src.web.routes._is_running", return_value=False):
+    with patch("src.adapters.web.app.is_research_running", return_value=False), \
+         patch("src.adapters.web.app.get_current_phase", return_value="idle"), \
+         patch("src.adapters.web.routes._is_running", return_value=False):
         app = create_app()
         yield TestClient(app, raise_server_exceptions=False)
 
@@ -33,9 +33,9 @@ def client(populated_db):
 @pytest.fixture
 def client_empty(db):
     """FastAPI test client with an empty database (no sessions)."""
-    with patch("src.web.app.is_research_running", return_value=False), \
-         patch("src.web.app.get_current_phase", return_value="idle"), \
-         patch("src.web.routes._is_running", return_value=False):
+    with patch("src.adapters.web.app.is_research_running", return_value=False), \
+         patch("src.adapters.web.app.get_current_phase", return_value="idle"), \
+         patch("src.adapters.web.routes._is_running", return_value=False):
         app = create_app()
         yield TestClient(app, raise_server_exceptions=False)
 

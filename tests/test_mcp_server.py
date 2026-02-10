@@ -4,14 +4,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from src.mcp_server import (
+from src.adapters.mcp import (
     research_presets, research_status, research_start, research_cancel,
     research_events, research_result,
     resource_runs, resource_run_status, resource_run_events,
     resource_run_tasks, resource_run_sources, resource_run_sections,
     resource_run_artifacts, resource_run_costs,
 )
-from src.service import get_service
+from src.pipeline.service import get_service
 
 
 class TestResearchPresets:
@@ -48,7 +48,7 @@ class TestResearchStatus:
         assert "costs" in result
 
     def test_progress_calculation(self, db):
-        from src.config import ResearchTask
+        from src.config.types import ResearchTask
 
         session = db.create_session("Test query")
         t1 = db.add_task(
@@ -134,7 +134,7 @@ class TestCancellationBehavior:
 
     def test_cancel_sets_flag_and_records_timestamp(self, db):
         """Verify cancel sets _cancel_requested flag and records timestamp in DB."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         session = db.create_session("Cancel test query")
         orchestrator = ResearchOrchestrator(register_signals=False)
@@ -157,7 +157,7 @@ class TestCancellationBehavior:
 
     def test_double_cancel_is_safe(self, db):
         """Two cancel calls don't error."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         session = db.create_session("Double cancel test")
         orchestrator = ResearchOrchestrator(register_signals=False)
@@ -184,8 +184,8 @@ class TestCancellationBehavior:
 
     def test_cancel_produces_cancelled_in_finalize(self, db):
         """_cancel_requested=True -> 'cancelled' status in _finalize."""
-        from src.orchestrator import ResearchOrchestrator
-        from src.config import ResearchTask
+        from src.pipeline import ResearchOrchestrator
+        from src.config.types import ResearchTask
 
         session = db.create_session("Finalize cancel test")
         # Add a pending task so status would normally be "partial"
@@ -205,8 +205,8 @@ class TestCancellationBehavior:
 
     def test_non_cancelled_partial_still_works(self, db):
         """Pending tasks without cancel -> 'partial' status."""
-        from src.orchestrator import ResearchOrchestrator
-        from src.config import ResearchTask
+        from src.pipeline import ResearchOrchestrator
+        from src.config.types import ResearchTask
 
         session = db.create_session("Partial test")
         db.add_task(
@@ -225,7 +225,7 @@ class TestCancellationBehavior:
 
     def test_mcp_cancel_returns_run_id(self, db):
         """research_cancel() includes run_id in response."""
-        from src.orchestrator import ResearchOrchestrator
+        from src.pipeline import ResearchOrchestrator
 
         session = db.create_session("MCP cancel run_id test")
         orchestrator = ResearchOrchestrator(register_signals=False)

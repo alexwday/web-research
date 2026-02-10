@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from src.compiler import ReportCompiler
-from src.config import (
+from src.pipeline.compiler import ReportCompiler
+from src.config.types import (
     ResearchTask, ReportSection, Source, GlossaryTerm, TaskStatus,
 )
-from src.database import get_database
+from src.infra._database import get_database
 
 
 # =========================================================================

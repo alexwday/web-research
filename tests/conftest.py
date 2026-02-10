@@ -32,9 +32,9 @@ def isolated_environment(tmp_path):
     Resets the global singletons in src.config and src.database so tests
     never leak state into each other.
     """
-    from src.config import Config, set_config
-    from src import database as db_mod
-    from src import service as svc_mod
+    from src.config.settings import Config, set_config
+    from src.infra import _database as db_mod
+    from src.pipeline import service as svc_mod
 
     db_file = str(tmp_path / "test_research.db")
     output_dir = str(tmp_path / "report")
@@ -75,7 +75,7 @@ def isolated_environment(tmp_path):
 @pytest.fixture
 def db():
     """Return a DatabaseManager backed by the test database."""
-    from src.database import get_database
+    from src.infra._database import get_database
     return get_database()
 
 
@@ -86,7 +86,7 @@ def populated_db(db):
     Returns a namespace with the created objects for easy reference.
     """
     from types import SimpleNamespace
-    from src.config import ResearchTask, ReportSection, Source, GlossaryTerm, TaskStatus
+    from src.config.types import ResearchTask, ReportSection, Source, GlossaryTerm, TaskStatus
 
     # Session
     session = db.create_session("Test research query about AI safety")
