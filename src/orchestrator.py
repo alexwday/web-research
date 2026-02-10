@@ -792,18 +792,3 @@ class ResearchOrchestrator:
             "statistics": stats,
             "duration_seconds": duration_seconds
         }
-
-
-def run_research(query: str, resume: bool = False) -> dict:
-    """
-    Main entry point for running research
-
-    Args:
-        query: The research query/topic
-        resume: Whether to resume an existing session
-
-    Returns:
-        Dict with output files and statistics
-    """
-    orchestrator = ResearchOrchestrator()
-    return orchestrator.run(query, resume)

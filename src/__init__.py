@@ -7,7 +7,7 @@ __author__ = "Deep Research Agent"
 
 from .config import get_config, get_env_settings, load_config
 from .database import get_database, DatabaseManager
-from .orchestrator import run_research, ResearchOrchestrator
+from .orchestrator import ResearchOrchestrator
 from .service import get_service, ResearchService
 from .agents import PlannerAgent, ResearcherAgent, EditorAgent
 from .compiler import ReportCompiler
@@ -26,7 +26,6 @@ __all__ = [
     "DatabaseManager",
     
     # Orchestrator
-    "run_research",
     "ResearchOrchestrator",
 
     # Service
