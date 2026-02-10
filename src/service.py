@@ -4,8 +4,11 @@ ResearchService — facade for research run lifecycle.
 Single API for CLI, web, and future MCP adapters.  Owns background-thread
 management so that callers never construct orchestrators directly.
 """
+import base64
 import io
+import json
 import threading
+from datetime import datetime
 from typing import Optional
 
 from .config import get_config, set_config, apply_overrides, RESEARCH_PRESETS
@@ -145,6 +148,84 @@ class ResearchService:
             "executive_summary": session.executive_summary,
             "conclusion": session.conclusion,
             "sections": section_list,
+        }
+
+    def get_run_events_page(
+        self,
+        session_id: Optional[int] = None,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> dict:
+        """Return a page of run events with cursor-based pagination.
+
+        Cursor is a base64-encoded JSON ``{"ts": "<iso>", "id": <int>}``.
+        """
+        db = get_database()
+        session = self._resolve_session(db, session_id)
+        if not session:
+            return {"session_id": None, "status": "no_session", "events": [], "next_cursor": None}
+
+        # Clamp limit
+        limit = max(1, min(limit, 500))
+
+        # Decode cursor
+        cursor_created_at = None
+        cursor_id = None
+        if cursor:
+            try:
+                decoded = json.loads(base64.b64decode(cursor))
+                cursor_created_at = datetime.fromisoformat(decoded["ts"])
+                cursor_id = decoded["id"]
+            except Exception:
+                pass  # Invalid cursor treated as start
+
+        events = db.get_run_events_paginated(
+            session_id=session.id,
+            cursor_created_at=cursor_created_at,
+            cursor_id=cursor_id,
+            limit=limit,
+        )
+
+        # Serialize events
+        serialized = []
+        for ev in events:
+            payload = None
+            if ev.payload_json:
+                try:
+                    payload = json.loads(ev.payload_json)
+                except Exception:
+                    payload = ev.payload_json
+            serialized.append({
+                "event_id": ev.id,
+                "ts": ev.created_at.isoformat() if ev.created_at else None,
+                "type": ev.event_type,
+                "task_id": ev.task_id,
+                "query_group": ev.query_group,
+                "payload": {
+                    "query_text": ev.query_text,
+                    "url": ev.url,
+                    "title": ev.title,
+                    "snippet": ev.snippet,
+                    "quality_score": ev.quality_score,
+                    "phase": ev.phase,
+                    "severity": ev.severity,
+                    "data": payload,
+                },
+            })
+
+        # Build next_cursor
+        next_cursor = None
+        if len(events) == limit:
+            last = events[-1]
+            ts = last.created_at.isoformat() if last.created_at else ""
+            next_cursor = base64.b64encode(
+                json.dumps({"ts": ts, "id": last.id}).encode()
+            ).decode()
+
+        return {
+            "session_id": session.id,
+            "events": serialized,
+            "next_cursor": next_cursor,
         }
 
     def list_presets(self) -> dict:

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from sqlalchemy import create_engine, func, text
+from sqlalchemy import create_engine, func, text, or_, and_
 from sqlalchemy.orm import sessionmaker
 
 from ..config import (
@@ -775,6 +775,35 @@ class DatabaseManager:
             return session.query(RunEventModel).filter(
                 RunEventModel.session_id == session_id
             ).order_by(RunEventModel.created_at).all()
+
+    def get_run_events_paginated(
+        self,
+        session_id: int,
+        cursor_created_at: Optional[datetime] = None,
+        cursor_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[RunEventModel]:
+        """Get run events with keyset pagination using (created_at, id).
+
+        Leverages the ix_run_events_timeline index for efficient paging.
+        """
+        with self.get_sync_session() as session:
+            query = session.query(RunEventModel).filter(
+                RunEventModel.session_id == session_id
+            )
+            if cursor_created_at is not None and cursor_id is not None:
+                query = query.filter(
+                    or_(
+                        RunEventModel.created_at > cursor_created_at,
+                        and_(
+                            RunEventModel.created_at == cursor_created_at,
+                            RunEventModel.id > cursor_id,
+                        ),
+                    )
+                )
+            return query.order_by(
+                RunEventModel.created_at, RunEventModel.id
+            ).limit(limit).all()
 
     def get_rejected_results(self, session_id: int) -> List[Dict[str, Any]]:
         """Return result events whose URLs were NOT saved as sources.
