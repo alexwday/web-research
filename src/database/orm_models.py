@@ -206,6 +206,7 @@ class SessionModel(Base):
     report_html_path = Column(String(500), nullable=True)
     refined_brief = Column(Text, nullable=True)
     refinement_qa = Column(Text, nullable=True)
+    cancel_requested_at = Column(DateTime, nullable=True)
 
     def to_pydantic(self) -> ResearchSession:
         return ResearchSession(
@@ -224,4 +225,5 @@ class SessionModel(Base):
             report_html_path=self.report_html_path,
             refined_brief=self.refined_brief,
             refinement_qa=self.refinement_qa,
+            cancel_requested_at=self.cancel_requested_at,
         )

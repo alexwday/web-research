@@ -100,7 +100,25 @@ class ResearchService:
 
     def cancel_run(self) -> dict:
         if self._orchestrator is not None:
+            self._orchestrator._cancel_requested = True
             self._orchestrator.is_running = False
+            session_id = self._orchestrator.session_id
+            if session_id is not None:
+                from datetime import datetime, timezone
+                import json
+                db = get_database()
+                now = datetime.now(timezone.utc)
+                db.update_session(session_id, cancel_requested_at=now)
+                db.add_run_event(
+                    session_id=session_id,
+                    event_type="cancellation_requested",
+                    phase=self._orchestrator.phase,
+                    severity="warning",
+                    payload_json=json.dumps({
+                        "cancelled_at": now.isoformat(),
+                        "phase": self._orchestrator.phase,
+                    }),
+                )
             return {"status": "cancelling"}
         return {"status": "not_running"}
 

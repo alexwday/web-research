@@ -53,6 +53,7 @@ class ResearchOrchestrator:
         self.query: Optional[str] = None
         self.start_time: Optional[datetime] = None
         self.is_running = False
+        self._cancel_requested = False
         self.phase: str = "idle"
 
         # Setup signal handlers for graceful shutdown (only from main thread)
@@ -748,7 +749,9 @@ class ResearchOrchestrator:
 
             failed = stats.get("failed_tasks", 0)
             pending = stats.get("pending_tasks", 0)
-            if pending > 0 and failed > 0:
+            if self._cancel_requested:
+                status = "cancelled"
+            elif pending > 0 and failed > 0:
                 status = "partial_with_errors"
             elif pending > 0:
                 status = "partial"
@@ -771,7 +774,9 @@ class ResearchOrchestrator:
             total_sources=stats["total_sources"],
             duration_seconds=duration_seconds
         )
-        if stats.get("pending_tasks", 0) > 0:
+        if self._cancel_requested:
+            print_warning("Session was cancelled by user request.")
+        elif stats.get("pending_tasks", 0) > 0:
             print_warning(
                 f"Run finished with {stats['pending_tasks']} pending task(s). "
                 "Resume to continue remaining work."

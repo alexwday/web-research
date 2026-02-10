@@ -61,6 +61,7 @@ class DatabaseManager:
         self._migrate_refinement_columns()
         self._migrate_source_columns()
         self._migrate_run_events()
+        self._migrate_cancel_requested_column()
 
     def _migrate_session_columns(self):
         """Add missing columns to the sessions table for existing databases."""
@@ -184,6 +185,17 @@ class DatabaseManager:
             """))
             conn.execute(text("DROP TABLE search_events"))
             conn.commit()
+
+    def _migrate_cancel_requested_column(self):
+        """Add cancel_requested_at column to sessions table for existing databases."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA table_info(sessions)")).fetchall()
+            existing = {row[1] for row in rows}
+            if "cancel_requested_at" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE sessions ADD COLUMN cancel_requested_at DATETIME"
+                ))
+                conn.commit()
 
     def get_sync_session(self):
         """Get a synchronous session"""

@@ -532,6 +532,7 @@ h1.page-title {
     border-color: #bdeac9;
 }
 
+.session-status-cancelled,
 .session-status-partial,
 .session-status-partial_with_errors,
 .session-status-completed_with_errors {

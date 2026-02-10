@@ -129,6 +129,7 @@ class ResearchSession(BaseModel):
     report_html_path: Optional[str] = None
     refined_brief: Optional[str] = None
     refinement_qa: Optional[str] = None
+    cancel_requested_at: Optional[datetime] = None
 
 
 # =============================================================================
