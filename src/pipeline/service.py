@@ -284,7 +284,7 @@ class ResearchService:
 
             def _worker():
                 # Suppress Rich console output so it doesn't garble uvicorn's terminal.
-                import src._utils.logger as _logger_mod
+                import src.config.logger as _logger_mod
                 _logger_mod.console = type(_logger_mod.console)(file=io.StringIO())
 
                 # Enable RBC SSL certs if available (needed in worker thread)

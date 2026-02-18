@@ -896,7 +896,7 @@ async def api_research_refine(request: Request):
             overrides[key] = value
 
     # Generate questions via LLM
-    from src.stages import QueryRefinementAgent
+    from src.pipeline._stages import QueryRefinementAgent
     agent = QueryRefinementAgent()
     questions = agent.generate_questions(query)
 
@@ -991,7 +991,7 @@ async def api_research_brief(request: Request):
     data["answers"] = qa_pairs
 
     # Generate brief via LLM
-    from src.stages import QueryRefinementAgent
+    from src.pipeline._stages import QueryRefinementAgent
     agent = QueryRefinementAgent()
     brief = agent.synthesize_brief(data["query"], qa_pairs)
     data["brief"] = brief

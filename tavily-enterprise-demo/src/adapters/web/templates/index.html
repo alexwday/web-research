@@ -1,0 +1,403 @@
+{% extends "base.html" %}
+{% block title %}Tavily Use-Case Walkthrough{% endblock %}
+
+{% block content %}
+<div class="backdrop"></div>
+<main class="shell">
+    <header class="hero">
+        <p class="kicker">Enterprise Tavily Demo</p>
+        <h1>Interactive Use-Case Walkthrough</h1>
+        <p class="subtitle">
+            Open any use case, walk through what it does, then run it live to show Tavily results,
+            progress logs, and generated artifacts.
+        </p>
+    </header>
+
+    <section class="card-grid" id="use-case-grid">
+        {% for uc in use_cases %}
+        <article class="use-case-card" data-use-case='{{ uc|tojson }}'>
+            <div class="card-head">
+                <h2>{{ uc.title }}</h2>
+                <span class="pill">{{ uc.id }}</span>
+            </div>
+            <p class="summary">{{ uc.summary }}</p>
+            <button class="open-btn" type="button" onclick="openWalkthrough('{{ uc.id }}')">Open Walkthrough</button>
+        </article>
+        {% endfor %}
+    </section>
+
+    <section class="recent-runs">
+        <div class="recent-head">
+            <h3>Recent Runs</h3>
+            <button type="button" class="ghost" onclick="refreshJobs()">Refresh</button>
+        </div>
+        <div id="recent-jobs" class="recent-list"></div>
+    </section>
+</main>
+
+<div id="walkthrough-modal" class="modal" hidden>
+    <div class="modal-panel">
+        <button class="close-modal" type="button" onclick="closeWalkthrough()">Close</button>
+        <div class="modal-header">
+            <p class="kicker" id="modal-kicker"></p>
+            <h2 id="modal-title"></h2>
+            <p id="modal-description"></p>
+        </div>
+
+        <div class="modal-columns">
+            <section class="flow-panel">
+                <h3>Walkthrough Steps</h3>
+                <ol id="modal-steps"></ol>
+            </section>
+
+            <section class="input-panel">
+                <h3>Run Controls</h3>
+                <form id="run-form"></form>
+                <button id="run-btn" class="run-btn" type="button" onclick="startRun()">Run This Use Case</button>
+            </section>
+        </div>
+
+        <section class="run-panel" id="run-panel" hidden>
+            <div class="run-head">
+                <h3>Live Execution</h3>
+                <span id="status-badge" class="status queued">queued</span>
+            </div>
+            <p id="progress-text" class="progress-text">Waiting for run to start...</p>
+            <div id="progress-meta" class="progress-meta"></div>
+            <div id="log-stream" class="log-stream"></div>
+            <pre id="result-json" class="result-json"></pre>
+        </section>
+    </div>
+</div>
+
+<div id="quarterly-modal" class="modal" hidden>
+    <div class="qm-panel">
+        <button class="close-modal" type="button" onclick="closeQuarterly()">Close</button>
+        <div class="qm-header">
+            <h2>Quarterly Disclosure Monitor</h2>
+            <select id="qm-quarter">
+                <option value="Q1">Q1</option>
+                <option value="Q2">Q2</option>
+                <option value="Q3">Q3</option>
+                <option value="Q4" selected>Q4</option>
+            </select>
+            <select id="qm-year">
+                <option value="2024">2024</option>
+                <option value="2025" selected>2025</option>
+                <option value="2026">2026</option>
+            </select>
+        </div>
+        <div id="qm-bank-bar" class="qm-bank-bar"></div>
+        <div class="qm-body">
+            <section class="qm-activity">
+                <h3>Activity Log</h3>
+                <div id="qm-tree"></div>
+            </section>
+            <section class="qm-preview">
+                <h3>Preview</h3>
+                <div id="qm-preview-content">
+                    <p class="qm-empty">Click a verified file's preview icon to view it here.</p>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+
+<script src="/static/quarterly.js?v=1"></script>
+<script>
+const USE_CASES = {{ use_cases|tojson }};
+let activeUseCase = null;
+let activeJobId = null;
+let jobPollTimer = null;
+
+function getUseCaseById(id) {
+    return USE_CASES.find((x) => x.id === id);
+}
+
+function openWalkthrough(useCaseId) {
+    if (useCaseId === 'quarterly-docs') {
+        openQuarterly();
+        return;
+    }
+
+    const uc = getUseCaseById(useCaseId);
+    if (!uc) return;
+
+    activeUseCase = uc;
+    activeJobId = null;
+
+    document.getElementById('modal-kicker').textContent = uc.id;
+    document.getElementById('modal-title').textContent = uc.title;
+    document.getElementById('modal-description').textContent = uc.description;
+
+    const steps = document.getElementById('modal-steps');
+    steps.innerHTML = '';
+    uc.steps.forEach((step) => {
+        const li = document.createElement('li');
+        li.textContent = step;
+        steps.appendChild(li);
+    });
+
+    const form = document.getElementById('run-form');
+    form.innerHTML = '';
+    uc.fields.forEach((field) => {
+        const wrap = document.createElement('label');
+        wrap.className = 'field';
+
+        const label = document.createElement('span');
+        label.textContent = field.label;
+        wrap.appendChild(label);
+
+        let input;
+        if (field.type === 'checkbox') {
+            input = document.createElement('input');
+            input.type = 'checkbox';
+            input.name = field.name;
+            input.checked = Boolean(field.default);
+            input.dataset.fieldType = field.type;
+            wrap.classList.add('checkbox-row');
+            wrap.insertBefore(input, label);
+        } else if (field.type === 'select') {
+            input = document.createElement('select');
+            input.name = field.name;
+            input.dataset.fieldType = 'select';
+            (field.options || []).forEach((opt) => {
+                const option = document.createElement('option');
+                option.value = opt.value;
+                option.textContent = opt.label;
+                if (opt.value === String(field.default)) option.selected = true;
+                input.appendChild(option);
+            });
+            wrap.appendChild(input);
+        } else {
+            input = document.createElement('input');
+            input.type = field.type === 'number' ? 'number' : 'text';
+            input.name = field.name;
+            input.value = field.default ?? '';
+            input.dataset.fieldType = field.type;
+            wrap.appendChild(input);
+        }
+
+        form.appendChild(wrap);
+    });
+
+    resetRunPanel();
+    document.getElementById('walkthrough-modal').hidden = false;
+}
+
+function closeWalkthrough() {
+    stopJobPolling();
+    document.getElementById('walkthrough-modal').hidden = true;
+}
+
+function resetRunPanel() {
+    document.getElementById('run-panel').hidden = true;
+    document.getElementById('status-badge').textContent = 'queued';
+    document.getElementById('status-badge').className = 'status queued';
+    document.getElementById('progress-text').textContent = 'Waiting for run to start...';
+    document.getElementById('progress-meta').textContent = '';
+    document.getElementById('log-stream').innerHTML = '';
+    document.getElementById('result-json').textContent = '';
+}
+
+function gatherFormPayload() {
+    const payload = {};
+    const form = document.getElementById('run-form');
+    form.querySelectorAll('input, select').forEach((el) => {
+        const type = el.dataset.fieldType;
+        if (type === 'checkbox') {
+            payload[el.name] = el.checked;
+        } else if (type === 'number') {
+            payload[el.name] = el.value === '' ? null : Number(el.value);
+        } else {
+            payload[el.name] = el.value;
+        }
+    });
+    return payload;
+}
+
+async function startRun() {
+    if (!activeUseCase) return;
+
+    const runBtn = document.getElementById('run-btn');
+    runBtn.disabled = true;
+    runBtn.textContent = 'Starting...';
+
+    try {
+        const response = await fetch(`/api/use-cases/${activeUseCase.id}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(gatherFormPayload()),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.detail || 'Failed to start run');
+        }
+
+        activeJobId = data.job_id;
+        document.getElementById('run-panel').hidden = false;
+        startJobPolling(activeJobId);
+    } catch (error) {
+        alert(`Run failed to start: ${error}`);
+    } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = 'Run This Use Case';
+    }
+}
+
+function startJobPolling(jobId) {
+    stopJobPolling();
+    pollJob(jobId);
+    jobPollTimer = setInterval(() => pollJob(jobId), 1200);
+}
+
+function stopJobPolling() {
+    if (jobPollTimer) {
+        clearInterval(jobPollTimer);
+        jobPollTimer = null;
+    }
+}
+
+async function pollJob(jobId) {
+    const response = await fetch(`/api/jobs/${jobId}`);
+    if (!response.ok) return;
+
+    const job = await response.json();
+    renderJob(job);
+
+    if (job.status === 'completed' || job.status === 'failed') {
+        stopJobPolling();
+        refreshJobs();
+    }
+}
+
+function renderJob(job) {
+    const badge = document.getElementById('status-badge');
+    badge.textContent = job.status;
+    badge.className = `status ${job.status}`;
+
+    const progressText = document.getElementById('progress-text');
+    const progressMeta = document.getElementById('progress-meta');
+    if (job.logs.length > 0) {
+        progressText.textContent = job.logs[job.logs.length - 1].message;
+    }
+
+    if (job.progress && Object.keys(job.progress).length > 0) {
+        progressMeta.textContent = JSON.stringify(job.progress, null, 0);
+    } else {
+        progressMeta.textContent = '';
+    }
+
+    const logStream = document.getElementById('log-stream');
+    logStream.innerHTML = '';
+    job.logs.slice(-120).forEach((entry) => {
+        const row = document.createElement('div');
+        row.className = 'log-row';
+        const time = document.createElement('span');
+        time.className = 'log-time';
+        time.textContent = entry.ts.slice(11, 19);
+        const msg = document.createElement('span');
+        msg.className = 'log-msg';
+        msg.textContent = entry.message;
+        row.appendChild(time);
+        row.appendChild(msg);
+        logStream.appendChild(row);
+    });
+
+    const resultEl = document.getElementById('result-json');
+    if (job.status === 'failed') {
+        resultEl.innerHTML = `<span class="result-error">Error: ${esc(job.error)}</span>`;
+    } else if (job.result) {
+        resultEl.innerHTML = renderResultView(job);
+    } else {
+        resultEl.innerHTML = '';
+    }
+}
+
+function esc(text) {
+    const d = document.createElement('div');
+    d.textContent = String(text ?? '');
+    return d.innerHTML;
+}
+
+function renderResultView(job) {
+    const r = job.result;
+    let html = '<div class="result-view">';
+
+    if (r.status) html += `<p><strong>Status:</strong> ${esc(r.status)}</p>`;
+    if (r.period) html += `<p><strong>Period:</strong> ${esc(r.period)}</p>`;
+    if (r.timeframe) html += `<p><strong>Timeframe:</strong> ${esc(r.timeframe)}</p>`;
+    if (r.query) html += `<p><strong>Query:</strong> ${esc(r.query)}</p>`;
+    if (r.headline_count != null) html += `<p><strong>Headlines:</strong> ${r.headline_count}</p>`;
+    if (r.source_count != null) html += `<p><strong>Sources:</strong> ${r.source_count}</p>`;
+    if (r.bank_count != null) html += `<p><strong>Banks:</strong> ${r.complete_banks ?? '?'}/${r.bank_count} complete</p>`;
+    if (r.auth_mode) html += `<p><strong>Auth mode:</strong> ${esc(r.auth_mode)}</p>`;
+
+    const fileKeys = Object.entries(r).filter(([k, v]) =>
+        typeof v === 'string' && (k.endsWith('_path') || k === 'output_path')
+    );
+    if (fileKeys.length) {
+        html += '<div class="result-files"><strong>Output Files:</strong><ul>';
+        fileKeys.forEach(([key, path]) => {
+            const label = key.replace(/_/g, ' ').replace(' path', '');
+            const ext = path.split('.').pop().toUpperCase();
+            html += `<li><a href="/api/files/download?path=${encodeURIComponent(path)}" target="_blank">${esc(label)} (${ext})</a> <small class="file-path">${esc(path)}</small></li>`;
+        });
+        html += '</ul></div>';
+    }
+
+    if (r.downloaded_files && r.downloaded_files.length) {
+        html += '<div class="result-files"><strong>Downloaded Artifacts:</strong><ul>';
+        r.downloaded_files.forEach(f => {
+            const ext = (f.extension || f.path.split('.').pop()).toUpperCase();
+            html += `<li><a href="/api/files/download?path=${encodeURIComponent(f.path)}" target="_blank">${esc(f.bank)} &mdash; ${esc(f.doc_type)} (${ext})</a></li>`;
+        });
+        html += '</ul></div>';
+    } else if (job.use_case === 'quarterly-docs' && r.status) {
+        html += '<p class="muted">No files downloaded (dry run or no matches found).</p>';
+    }
+
+    html += `<details class="result-details"><summary>View full JSON</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>`;
+    html += '</div>';
+    return html;
+}
+
+async function refreshJobs() {
+    const response = await fetch('/api/jobs');
+    if (!response.ok) return;
+
+    const data = await response.json();
+    const list = document.getElementById('recent-jobs');
+    list.innerHTML = '';
+
+    if (!data.jobs.length) {
+        list.innerHTML = '<p class="empty">No runs yet.</p>';
+        return;
+    }
+
+    data.jobs.forEach((job) => {
+        const row = document.createElement('button');
+        row.className = 'recent-item';
+        row.type = 'button';
+        row.onclick = () => {
+            openWalkthrough(job.use_case);
+            document.getElementById('run-panel').hidden = false;
+            activeJobId = job.id;
+            renderJob(job);
+            if (job.status === 'queued' || job.status === 'running') {
+                startJobPolling(job.id);
+            }
+        };
+
+        row.innerHTML = `
+            <span class="recent-title">${job.use_case}</span>
+            <span class="recent-status ${job.status}">${job.status}</span>
+            <span class="recent-ts">${job.created_at}</span>
+        `;
+        list.appendChild(row);
+    });
+}
+
+window.addEventListener('DOMContentLoaded', refreshJobs);
+</script>
+{% endblock %}
