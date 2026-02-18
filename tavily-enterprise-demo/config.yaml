@@ -1,0 +1,110 @@
+search:
+  depth: "advanced"
+  default_max_results: 8
+  min_tavily_score: 0.15
+  search_calls_per_minute: 12
+  scrape_requests_per_minute: 20
+  include_domains: []
+  exclude_domains:
+    - "pinterest.com"
+    - "quora.com"
+    - "acronymattic.com"
+    - "abbreviations.com"
+    - "dokumen.pub"
+    - "dokumen.tips"
+  secondary_search_enabled: true
+
+download:
+  directory: "report/artifacts"
+  timeout_seconds: 45
+  allowed_extensions:
+    - "pdf"
+    - "xlsx"
+    - "xls"
+  user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+quarterly:
+  poll_seconds: 900
+  max_iterations: 96
+  max_verify_candidates: 5
+  document_targets:
+    - doc_type: "report_to_shareholders"
+      label: "Report to Shareholders"
+      required_formats: ["pdf"]
+    - doc_type: "pillar3_disclosure"
+      label: "Pillar 3 Disclosure"
+      required_formats: ["pdf", "xlsx"]
+    - doc_type: "supplementary_financial_info"
+      label: "Supplementary Financial Information / Financial Supplement"
+      required_formats: ["pdf", "xlsx"]
+
+lcr:
+  query_template: "{bank_name} {period} liquidity coverage ratio LCR percentage disclosure"
+
+headlines:
+  default_topics:
+    - "canadian finance"
+    - "bank earnings"
+    - "interest rates"
+    - "capital markets"
+    - "credit and liquidity"
+  results_per_query: 6
+
+deep_research:
+  subqueries_per_run: 4
+  max_sources: 12
+  max_excerpt_chars: 1800
+
+output:
+  directory: "report"
+
+llm_ranking:
+  enabled: true
+  model: "gpt-4.1-mini"
+  max_tokens: 2000
+  temperature: 0.1
+
+banks:
+  - code: "rbc"
+    name: "Royal Bank of Canada"
+    aliases: ["RBC"]
+    primary_domains: ["rbc.com"]
+    ir_pages:
+      - "https://www.rbc.com/investor-relations/financial-information.html"
+    doc_naming:
+      pillar3_disclosure:
+        document_aliases: ["Supplementary Regulatory Capital Disclosure"]
+        url_patterns: []
+      supplementary_financial_info:
+        document_aliases: []
+        url_patterns: ["supp.pdf", "supp.xlsx"]
+  - code: "td"
+    name: "Toronto-Dominion Bank"
+    aliases: ["TD Bank", "TD"]
+    primary_domains: ["td.com"]
+    ir_pages:
+      - "https://www.td.com/ca/en/about-td/for-investors/investor-relations/financial-information/financial-reports/quarterly-results/quarterly-results-{year}"
+      - "https://www.td.com/ca/en/about-td/for-investors/investor-relations/financial-information/financial-reports/annual-reports/annual-report-{year}"
+    doc_naming:
+      pillar3_disclosure:
+        document_aliases: ["Supplemental Regulatory Disclosure"]
+        url_patterns: ["regulatory-disclosure", "supp-regulatory"]
+      supplementary_financial_info:
+        document_aliases: []
+        url_patterns: ["supplemental-financial"]
+  - code: "bns"
+    name: "Scotiabank"
+    aliases: ["Bank of Nova Scotia", "BNS"]
+    primary_domains: ["scotiabank.com"]
+  - code: "bmo"
+    name: "Bank of Montreal"
+    aliases: ["BMO"]
+    primary_domains: ["bmo.com"]
+  - code: "cm"
+    name: "Canadian Imperial Bank of Commerce"
+    aliases: ["CIBC", "CM"]
+    primary_domains: ["cibc.com"]
+  - code: "na"
+    name: "National Bank of Canada"
+    aliases: ["NBC", "National Bank"]
+    primary_domains: ["nbc.ca", "bnc.ca"]
